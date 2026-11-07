@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   build:
-    if: github.repository == 'ModAVD/ModAVDExtras'
+    if: github.repository == 'ModAVD/ModAVDExtras' && !github.event.deleted
     runs-on: windows-2025
     timeout-minutes: 20
     permissions:
@@ -28,12 +28,15 @@ jobs:
           TAG: ${{ github.ref_name }}
           SHA: ${{ github.sha }}
         run: |
-          if ($env:TAG -notmatch '^v\d+\.\d+\.\d+$') { throw "invalid tag: $env:TAG" }
-          git merge-base --is-ancestor $env:SHA origin/main
+          if ($env:TAG -cnotmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') { throw "invalid tag: $env:TAG" }
+          # Full ref name: a tag called origin/main would win over the remote branch.
+          git merge-base --is-ancestor $env:SHA refs/remotes/origin/main
           if ($LASTEXITCODE -ne 0) { throw 'tag is not on origin/main' }
           $version = $env:TAG.Substring(1)
-          $want = (Select-String -LiteralPath CMakeLists.txt -Pattern 'project\(ModAVDExtras VERSION (\d+\.\d+\.\d+)').Matches.Groups[1].Value
-          if ($want -ne $version) { throw "CMakeLists.txt version=$want, tag=$version" }
+          $found = @(Select-String -LiteralPath CMakeLists.txt -CaseSensitive -Pattern '^project\(ModAVDExtras VERSION ([0-9]+\.[0-9]+\.[0-9]+)')
+          if ($found.Count -ne 1) { throw "expected one project(ModAVDExtras VERSION ...) line in CMakeLists.txt, found $($found.Count)" }
+          $want = $found[0].Matches[0].Groups[1].Value
+          if ($want -cne $version) { throw "CMakeLists.txt version=$want, tag=$version" }
       - name: build, test and verify
         shell: pwsh
         env:
@@ -47,22 +50,13 @@ jobs:
           ctest --test-dir build -C Release --output-on-failure
           if ($LASTEXITCODE -ne 0) { throw 'tests failed' }
           $version = $env:TAG.Substring(1)
+          # The list must be exactly these lines, in this order: what ci.yml prints for the same build.
           $names = @('external_renderer_ipc.dll', 'modavd_extras.dll')
-          $sums = @{}
-          foreach ($line in Get-Content "release/$version.SHA256SUMS.txt") {
-            if ($line -notmatch '^([0-9a-f]{64})  (.+)$') { throw "bad line in SHA256SUMS: $line" }
-            $sums[$Matches[2]] = $Matches[1]
-          }
-          if ((($sums.Keys | Sort-Object) -join ',') -cne ($names -join ',')) { throw "SHA256SUMS must list exactly: $($names -join ', ')" }
+          $lines = foreach ($name in $names) { '{0}  {1}' -f (Get-FileHash "build/Release/$name" -Algorithm SHA256).Hash.ToLowerInvariant(), $name }
+          $lines
+          if ((Get-Content -Raw "release/$version.SHA256SUMS.txt") -cne (($lines -join "`n") + "`n")) { throw "release/$version.SHA256SUMS.txt must be exactly the lines above" }
           New-Item -ItemType Directory -Force artifacts | Out-Null
-          $bad = $false
-          foreach ($name in $names) {
-            $got = (Get-FileHash "build/Release/$name" -Algorithm SHA256).Hash.ToLowerInvariant()
-            "$got  $name"
-            if ($got -ne $sums[$name]) { Write-Output "::error::$name hash mismatch: built $got, release/$version.SHA256SUMS.txt has $($sums[$name])"; $bad = $true }
-            Copy-Item "build/Release/$name" artifacts
-          }
-          if ($bad) { throw 'hash mismatch' }
+          foreach ($name in $names) { Copy-Item "build/Release/$name" artifacts }
           Copy-Item "release/$version.SHA256SUMS.txt" artifacts/SHA256SUMS.txt
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -115,5 +109,11 @@ jobs:
           $tags = gh api "repos/$env:GH_REPO/releases?per_page=100" --paginate --jq '.[].tag_name'
           if ($LASTEXITCODE -ne 0) { throw 'cannot list releases' }
           if ($tags -contains $env:TAG) { throw "a release for $env:TAG already exists (draft or published)" }
-          gh release create $env:TAG --draft --verify-tag --title "ModAVDExtras v$version" --notes-file "release/$version.md" artifacts/modavd_extras.dll artifacts/external_renderer_ipc.dll artifacts/SHA256SUMS.txt
+          # --verify-tag only checks that the tag exists: make sure it still points at the commit the build job built.
+          $head = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'git rev-parse failed' }
+          $tagCommit = gh api "repos/$env:GH_REPO/commits/tags/$env:TAG" --jq .sha
+          if ($LASTEXITCODE -ne 0) { throw "cannot resolve $env:TAG" }
+          if ($tagCommit -ne $head) { throw "$env:TAG now points at $tagCommit; this run built $head" }
+          gh release create $env:TAG --draft --verify-tag --notes-file "release/$version.md" artifacts/modavd_extras.dll artifacts/external_renderer_ipc.dll artifacts/SHA256SUMS.txt
           if ($LASTEXITCODE -ne 0) { throw 'gh release create failed' }
