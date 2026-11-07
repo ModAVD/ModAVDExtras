@@ -1,0 +1,119 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.repository == 'ModAVD/ModAVDExtras'
+    runs-on: windows-2025
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: verify tag, ancestry and version
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          if ($env:TAG -notmatch '^v\d+\.\d+\.\d+$') { throw "invalid tag: $env:TAG" }
+          git merge-base --is-ancestor $env:SHA origin/main
+          if ($LASTEXITCODE -ne 0) { throw 'tag is not on origin/main' }
+          $version = $env:TAG.Substring(1)
+          $want = (Select-String -LiteralPath CMakeLists.txt -Pattern 'project\(ModAVDExtras VERSION (\d+\.\d+\.\d+)').Matches.Groups[1].Value
+          if ($want -ne $version) { throw "CMakeLists.txt version=$want, tag=$version" }
+      - name: build, test and verify
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          # The same build as ci.yml's windows job.
+          cmake -S . -B build -A x64
+          if ($LASTEXITCODE -ne 0) { throw 'configure failed' }
+          cmake --build build --config Release
+          if ($LASTEXITCODE -ne 0) { throw 'build failed' }
+          ctest --test-dir build -C Release --output-on-failure
+          if ($LASTEXITCODE -ne 0) { throw 'tests failed' }
+          $version = $env:TAG.Substring(1)
+          $names = @('external_renderer_ipc.dll', 'modavd_extras.dll')
+          $sums = @{}
+          foreach ($line in Get-Content "release/$version.SHA256SUMS.txt") {
+            if ($line -notmatch '^([0-9a-f]{64})  (.+)$') { throw "bad line in SHA256SUMS: $line" }
+            $sums[$Matches[2]] = $Matches[1]
+          }
+          if ((($sums.Keys | Sort-Object) -join ',') -cne ($names -join ',')) { throw "SHA256SUMS must list exactly: $($names -join ', ')" }
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+          $bad = $false
+          foreach ($name in $names) {
+            $got = (Get-FileHash "build/Release/$name" -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$got  $name"
+            if ($got -ne $sums[$name]) { Write-Output "::error::$name hash mismatch: built $got, release/$version.SHA256SUMS.txt has $($sums[$name])"; $bad = $true }
+            Copy-Item "build/Release/$name" artifacts
+          }
+          if ($bad) { throw 'hash mismatch' }
+          Copy-Item "release/$version.SHA256SUMS.txt" artifacts/SHA256SUMS.txt
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-assets
+          path: artifacts
+          if-no-files-found: error
+
+  draft:
+    needs: build
+    runs-on: windows-2025
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-assets
+          path: artifacts
+      - name: verify artifact
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          # Checked against the tag's own list, not only the copy that travelled with the artifact.
+          $version = $env:TAG.Substring(1)
+          $sums = Get-Content -Raw "release/$version.SHA256SUMS.txt"
+          if ((Get-Content -Raw artifacts/SHA256SUMS.txt) -cne $sums) { throw 'artifact SHA256SUMS.txt differs from the tag' }
+          $names = @('external_renderer_ipc.dll', 'modavd_extras.dll')
+          $have = (Get-ChildItem artifacts -File | ForEach-Object Name | Sort-Object) -join ','
+          $expect = (@($names + 'SHA256SUMS.txt') | Sort-Object) -join ','
+          if ($have -cne $expect) { throw "unexpected artifact files: $have" }
+          foreach ($name in $names) {
+            $want = [regex]::Match($sums, "(?m)^([0-9a-f]{64})  $([regex]::Escape($name))\r?$").Groups[1].Value
+            $got = (Get-FileHash "artifacts/$name" -Algorithm SHA256).Hash.ToLowerInvariant()
+            if (-not $want -or $got -ne $want) { throw "downloaded $name hash mismatch" }
+          }
+      - name: create draft
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $version = $env:TAG.Substring(1)
+          # Drafts are not bound to their tag, so one tag can collect several: list every release, drafts included.
+          $tags = gh api "repos/$env:GH_REPO/releases?per_page=100" --paginate --jq '.[].tag_name'
+          if ($LASTEXITCODE -ne 0) { throw 'cannot list releases' }
+          if ($tags -contains $env:TAG) { throw "a release for $env:TAG already exists (draft or published)" }
+          gh release create $env:TAG --draft --verify-tag --title "ModAVDExtras v$version" --notes-file "release/$version.md" artifacts/modavd_extras.dll artifacts/external_renderer_ipc.dll artifacts/SHA256SUMS.txt
+          if ($LASTEXITCODE -ne 0) { throw 'gh release create failed' }

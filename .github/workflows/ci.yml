@@ -29,7 +29,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "build failed" }
           ctest --test-dir build -C Release --output-on-failure
           if ($LASTEXITCODE -ne 0) { throw "tests failed" }
-          Get-FileHash build\Release\*.dll -Algorithm SHA256 | Format-Table -AutoSize
+          # In the format of release/<version>.SHA256SUMS.txt.
+          Get-ChildItem build\Release\*.dll | Sort-Object Name | ForEach-Object { '{0}  {1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name }
 
   posix:
     strategy:
