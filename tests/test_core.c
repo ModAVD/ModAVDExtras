@@ -98,7 +98,7 @@ static uint8_t expected_channel(uint32_t format, int channel, uint32_t x, uint32
     switch (format) {
     case MODAVD_FMT_BGRA: return (uint8_t[]){ b, g, r, 0xFF }[channel];
     case MODAVD_FMT_RGBA: return (uint8_t[]){ r, g, b, 0xFF }[channel];
-    default: return (uint8_t[]){ b, g, r }[channel];
+    default: return (uint8_t[]){ b, g, r, 0 }[channel]; /* 4 entries: GCC -O3 cannot tell channel < 3 here */
     }
 }
 
@@ -204,6 +204,120 @@ static void test_capture_from_fake_frame(void)
     fake_frame_destroy(&f);
 }
 
+/* Same frame through the public call at sizes that leave every possible tail after the
+ * 16- and 4-pixel blocks, top-down and bottom-up. */
+static void test_capture_odd_sizes(void)
+{
+    static const uint32_t sizes[][2] = { { 1, 1 }, { 1, 5 }, { 3, 4 }, { 15, 3 }, { 17, 5 }, { 33, 2 }, { 1281, 3 } };
+    for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); ++i) {
+        const int port = 65003 + (int)i;
+        const uint32_t w = sizes[i][0], hgt = sizes[i][1];
+        fake_frame f;
+        if (fake_frame_create(&f, port, w, hgt, w, hgt) != 0) {
+            fprintf(stderr, "cannot create the fake frame %ux%u\n", w, hgt);
+            ++g_failures;
+            continue;
+        }
+        modavd_open_params p;
+        memset(&p, 0, sizeof(p));
+        p.size = sizeof(p);
+        p.console_port = port;
+        p.flags = MODAVD_OPEN_NO_START;
+        modavd_handle h = NULL;
+        CHECK_EQ(modavd_open(&p, &h), MODAVD_OK);
+        if (h) {
+            static const uint32_t all_flags[] = { 0, MODAVD_CAPTURE_BOTTOM_UP };
+            for (size_t fi = 0; fi < 2; ++fi) {
+                check_capture(h, MODAVD_FMT_BGR, 3, all_flags[fi], w, hgt);
+                check_capture(h, MODAVD_FMT_RGBA, 4, all_flags[fi], w, hgt);
+                check_capture(h, MODAVD_FMT_BGRA, 4, all_flags[fi], w, hgt);
+            }
+            modavd_close(h);
+        }
+        fake_frame_destroy(&f);
+    }
+}
+
+/* One pixel of the reference: what mx_convert_row must write for BGRA pixel s. */
+static void reference_pixel(const uint8_t* s, uint32_t format, uint8_t* out)
+{
+    switch (format) {
+    case MODAVD_FMT_RGBA:
+        out[0] = s[2], out[1] = s[1], out[2] = s[0], out[3] = s[3];
+        break;
+    case MODAVD_FMT_BGR:
+        out[0] = s[0], out[1] = s[1], out[2] = s[2];
+        break;
+    default:
+        memcpy(out, s, 4);
+        break;
+    }
+}
+
+/* Row conversion against the per-pixel reference: every width up to a few blocks plus
+ * real screen widths, misaligned source and destination, the alpha byte not 0xFF, and
+ * guard bytes on both sides of the row to catch a block writing past its end. Runs the
+ * portable code and, where the CPU has it, the vector code. */
+static void test_convert_row(void)
+{
+    const size_t GUARD = 64, MAX_W = 1921;
+    static const uint32_t extra_widths[] = { 255, 256, 257, 719, 720, 1279, 1280, 1281, 1919, 1920, 1921 };
+    static const uint32_t formats[][2] = { { MODAVD_FMT_BGR, 3 }, { MODAVD_FMT_RGBA, 4 }, { MODAVD_FMT_BGRA, 4 } };
+    uint8_t* src = (uint8_t*)malloc(MAX_W * 4 + 4);
+    uint8_t* dst = (uint8_t*)malloc(GUARD + MAX_W * 4 + 4 + GUARD);
+    uint8_t* want = (uint8_t*)malloc(MAX_W * 4);
+    if (!src || !dst || !want) {
+        ++g_failures;
+        free(src), free(dst), free(want);
+        return;
+    }
+    uint32_t seed = 12345;
+    for (size_t i = 0; i < MAX_W * 4 + 4; ++i) {
+        seed = seed * 1103515245u + 12345u;
+        src[i] = (uint8_t)(seed >> 16);
+    }
+
+    int simd_levels[2] = { 0, mx_cpu_simd() };
+    int n_levels = simd_levels[1] ? 2 : 1;
+    printf("test_core: row conversion with portable code%s\n", n_levels == 2 ? " and the vector path" : " only");
+    int bad = 0;
+    for (int lv = 0; lv < n_levels && !bad; ++lv) {
+        for (size_t fi = 0; fi < sizeof(formats) / sizeof(formats[0]) && !bad; ++fi) {
+            const uint32_t format = formats[fi][0], bpp = formats[fi][1];
+            for (uint32_t wi = 0; wi < 68 + sizeof(extra_widths) / sizeof(extra_widths[0]) && !bad; ++wi) {
+                const uint32_t w = wi < 68 ? wi : extra_widths[wi - 68];
+                for (uint32_t so = 0; so < 4 && !bad; ++so) {
+                    for (uint32_t d_off = 0; d_off < 4 && !bad; ++d_off) {
+                        const uint8_t* s = src + so;
+                        for (uint32_t x = 0; x < w; ++x) {
+                            reference_pixel(s + (size_t)x * 4, format, want + (size_t)x * bpp);
+                        }
+                        size_t row = (size_t)w * bpp, total = GUARD + MAX_W * 4 + 4 + GUARD;
+                        memset(dst, 0xA5, total);
+                        uint8_t* d = dst + GUARD + d_off;
+                        mx_convert_row(s, d, w, format, simd_levels[lv]);
+                        if (memcmp(d, want, row) != 0) {
+                            fprintf(stderr, "simd %d format %u width %u offsets %u/%u: row differs\n",
+                                    simd_levels[lv], format, w, so, d_off);
+                            bad = 1;
+                        }
+                        for (size_t i = 0; i < total && !bad; ++i) {
+                            int inside = i >= (size_t)(d - dst) && i < (size_t)(d - dst) + row;
+                            if (!inside && dst[i] != 0xA5) {
+                                fprintf(stderr, "simd %d format %u width %u offsets %u/%u: wrote outside the row\n",
+                                        simd_levels[lv], format, w, so, d_off);
+                                bad = 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    CHECK(!bad);
+    free(src), free(dst), free(want);
+}
+
 static int g_log_lines;
 static void count_log(int level, const char* msg, void* user)
 {
@@ -233,6 +347,8 @@ int main(void)
     test_version_and_errors();
     test_open_errors();
     test_capture_from_fake_frame();
+    test_capture_odd_sizes();
+    test_convert_row();
     test_log_callback();
     if (g_failures) {
         fprintf(stderr, "%d check(s) failed\n", g_failures);

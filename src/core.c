@@ -21,6 +21,19 @@ static void sleep_ms(int ms)
 }
 #endif
 
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
+#define MX_X86 1
+#include <tmmintrin.h>
+#if defined(_MSC_VER)
+#include <intrin.h>
+#else
+#include <cpuid.h>
+#endif
+#elif defined(__aarch64__) || defined(_M_ARM64)
+#define MX_NEON 1
+#include <arm_neon.h>
+#endif
+
 #ifndef MODAVD_EXTRAS_VERSION
 #define MODAVD_EXTRAS_VERSION "0.0.0"
 #endif
@@ -112,6 +125,7 @@ int modavd_open(const modavd_open_params* params, modavd_handle* out)
         return MODAVD_E_IO;
     }
     inst->console_port = port;
+    inst->simd = mx_cpu_simd();
     inst->shm = shm;
     const volatile mx_video_info* vi = (const volatile mx_video_info*)shm.view;
     mx_log(MODAVD_LOG_INFO, "open port=%d %ux%u fps=%u frame=%u size=%zu client=%s", port, vi->width, vi->height,
@@ -143,7 +157,90 @@ static int bytes_per_pixel(uint32_t format)
     }
 }
 
-static void convert_row(const uint8_t* src, uint8_t* dst, uint32_t width, uint32_t format)
+#if defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+#error "the pixel conversion below assumes a little-endian CPU"
+#endif
+
+/* BGRA -> BGR, portable: four pixels (16 bytes) in, three little-endian words (12 bytes) out,
+ * then one pixel at a time for the last 0-3. */
+static void bgr_row_portable(const uint8_t* src, uint8_t* dst, uint32_t width)
+{
+    uint32_t x = 0;
+    for (; x + 4 <= width; x += 4, src += 16, dst += 12) {
+        uint32_t p[4], o[3];
+        memcpy(p, src, sizeof(p));
+        o[0] = (p[0] & 0x00FFFFFFu) | (p[1] << 24);         /* B0 G0 R0 B1 */
+        o[1] = ((p[1] >> 8) & 0x0000FFFFu) | (p[2] << 16);  /* G1 R1 B2 G2 */
+        o[2] = ((p[2] >> 16) & 0x000000FFu) | (p[3] << 8);  /* R2 B3 G3 R3 */
+        memcpy(dst, o, sizeof(o));
+    }
+    for (; x < width; ++x, src += 4, dst += 3) {
+        dst[0] = src[0];
+        dst[1] = src[1];
+        dst[2] = src[2];
+    }
+}
+
+#if MX_X86
+/* BGRA -> BGR, 16 pixels at a time: pshufb packs each 16-byte load to 12 bytes,
+ * then shifts and ORs splice four of those into three 16-byte stores.
+ * Returns how many pixels it converted (a multiple of 16). */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((target("ssse3")))
+#endif
+static uint32_t bgr_row_ssse3(const uint8_t* src, uint8_t* dst, uint32_t width)
+{
+    const __m128i pack = _mm_setr_epi8(0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14, -1, -1, -1, -1);
+    uint32_t x = 0;
+    for (; x + 16 <= width; x += 16, src += 64, dst += 48) {
+        __m128i a = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(const void*)src), pack);
+        __m128i b = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(const void*)(src + 16)), pack);
+        __m128i c = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(const void*)(src + 32)), pack);
+        __m128i d = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(const void*)(src + 48)), pack);
+        _mm_storeu_si128((__m128i*)(void*)dst, _mm_or_si128(a, _mm_slli_si128(b, 12)));
+        _mm_storeu_si128((__m128i*)(void*)(dst + 16), _mm_or_si128(_mm_srli_si128(b, 4), _mm_slli_si128(c, 8)));
+        _mm_storeu_si128((__m128i*)(void*)(dst + 32), _mm_or_si128(_mm_srli_si128(c, 8), _mm_slli_si128(d, 4)));
+    }
+    return x;
+}
+#elif MX_NEON
+/* BGRA -> BGR, 16 pixels at a time: split the channels, store three of them interleaved. */
+static uint32_t bgr_row_neon(const uint8_t* src, uint8_t* dst, uint32_t width)
+{
+    uint32_t x = 0;
+    for (; x + 16 <= width; x += 16, src += 64, dst += 48) {
+        uint8x16x4_t p = vld4q_u8(src);
+        uint8x16x3_t o;
+        o.val[0] = p.val[0];
+        o.val[1] = p.val[1];
+        o.val[2] = p.val[2];
+        vst3q_u8(dst, o);
+    }
+    return x;
+}
+#endif
+
+int mx_cpu_simd(void)
+{
+#if MX_X86
+#if defined(__SSSE3__) || defined(__AVX__)
+    return 1;
+#elif defined(_MSC_VER)
+    int r[4];
+    __cpuid(r, 1);
+    return (r[2] >> 9) & 1; /* CPUID.1:ECX.SSSE3 */
+#else
+    unsigned a, b, c, d;
+    return __get_cpuid(1, &a, &b, &c, &d) && ((c >> 9) & 1);
+#endif
+#elif MX_NEON
+    return 1; /* part of every ARM64 CPU */
+#else
+    return 0;
+#endif
+}
+
+void mx_convert_row(const uint8_t* src, uint8_t* dst, uint32_t width, uint32_t format, int simd)
 {
     switch (format) {
     case MODAVD_FMT_BGRA:
@@ -159,19 +256,28 @@ static void convert_row(const uint8_t* src, uint8_t* dst, uint32_t width, uint32
             memcpy(dst + (size_t)x * 4, &p, 4);
         }
         break;
-    case MODAVD_FMT_BGR:
-        for (uint32_t x = 0; x < width; ++x, src += 4, dst += 3) {
-            dst[0] = src[0];
-            dst[1] = src[1];
-            dst[2] = src[2];
+    case MODAVD_FMT_BGR: {
+        uint32_t done = 0;
+#if MX_X86
+        if (simd) {
+            done = bgr_row_ssse3(src, dst, width);
         }
+#elif MX_NEON
+        if (simd) {
+            done = bgr_row_neon(src, dst, width);
+        }
+#else
+        (void)simd;
+#endif
+        bgr_row_portable(src + (size_t)done * 4, dst + (size_t)done * 3, width - done);
         break;
+    }
     default:
         break;
     }
 }
 
-int mx_copy_frame(const mx_shm* shm, uint32_t format, uint32_t flags, void* buf, size_t buf_size,
+int mx_copy_frame(const mx_shm* shm, uint32_t format, uint32_t flags, int simd, void* buf, size_t buf_size,
                   modavd_frame_info* info)
 {
     int bpp = bytes_per_pixel(format);
@@ -208,7 +314,7 @@ int mx_copy_frame(const mx_shm* shm, uint32_t format, uint32_t flags, void* buf,
         uint32_t before = vi->frame_number;
         for (uint32_t y = 0; y < h; ++y) {
             uint32_t sy = (flags & MODAVD_CAPTURE_BOTTOM_UP) ? h - 1 - y : y;
-            convert_row(src + (size_t)sy * src_stride, dst + (size_t)y * (size_t)info->stride, w, format);
+            mx_convert_row(src + (size_t)sy * src_stride, dst + (size_t)y * (size_t)info->stride, w, format, simd);
         }
         uint32_t after = vi->frame_number;
         info->frame_number = after;
@@ -229,7 +335,7 @@ int modavd_capture(modavd_handle h, int display, uint32_t format, uint32_t flags
     if (display != 0) {
         return MODAVD_E_UNSUPPORTED;
     }
-    return mx_copy_frame(&h->shm, format, flags, buf, buf_size, info);
+    return mx_copy_frame(&h->shm, format, flags, h->simd, buf, buf_size, info);
 }
 
 /* Input arrives in the next version. */

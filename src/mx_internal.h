@@ -62,11 +62,21 @@ int mx_console_command(int port, const char* command, int timeout_ms);
 /* ---- core.c ---- */
 struct modavd_instance {
     int console_port;
+    int simd; /* mx_cpu_simd() at open */
     mx_shm shm;
 };
 
+/* 1 when this CPU runs the vector row conversion (SSSE3 on x86, NEON on
+ * ARM64), else 0. */
+int mx_cpu_simd(void);
+
+/* Converts one row of width BGRA pixels into format (MODAVD_FMT_*), writing
+ * exactly width * bytes-per-pixel bytes. src and dst need no alignment.
+ * simd: the value of mx_cpu_simd(), or 0 for the portable code only. */
+void mx_convert_row(const uint8_t* src, uint8_t* dst, uint32_t width, uint32_t format, int simd);
+
 /* Copies one frame; the work behind modavd_capture(). */
-int mx_copy_frame(const mx_shm* shm, uint32_t format, uint32_t flags, void* buf, size_t buf_size,
+int mx_copy_frame(const mx_shm* shm, uint32_t format, uint32_t flags, int simd, void* buf, size_t buf_size,
                   modavd_frame_info* info);
 
 #ifdef __cplusplus
