@@ -277,6 +277,9 @@ void mx_convert_row(const uint8_t* src, uint8_t* dst, uint32_t width, uint32_t f
     }
 }
 
+void (*mx_test_after_copy)(void* user) = NULL;
+void* mx_test_after_copy_user = NULL;
+
 int mx_copy_frame(const mx_shm* shm, uint32_t format, uint32_t flags, int simd, void* buf, size_t buf_size,
                   modavd_frame_info* info)
 {
@@ -316,14 +319,17 @@ int mx_copy_frame(const mx_shm* shm, uint32_t format, uint32_t flags, int simd, 
             uint32_t sy = (flags & MODAVD_CAPTURE_BOTTOM_UP) ? h - 1 - y : y;
             mx_convert_row(src + (size_t)sy * src_stride, dst + (size_t)y * (size_t)info->stride, w, format, simd);
         }
+        if (mx_test_after_copy) {
+            mx_test_after_copy(mx_test_after_copy_user);
+        }
         uint32_t after = vi->frame_number;
         info->frame_number = after;
         info->timestamp_us = vi->ts_us;
         if (after == before) {
-            break;
+            return MODAVD_OK;
         }
     }
-    return MODAVD_OK;
+    return MX_TORN;
 }
 
 int modavd_capture(modavd_handle h, int display, uint32_t format, uint32_t flags, void* buf, size_t buf_size,
@@ -335,7 +341,13 @@ int modavd_capture(modavd_handle h, int display, uint32_t format, uint32_t flags
     if (display != 0) {
         return MODAVD_E_UNSUPPORTED;
     }
-    return mx_copy_frame(&h->shm, format, flags, h->simd, buf, buf_size, info);
+    int rc = mx_copy_frame(&h->shm, format, flags, h->simd, buf, buf_size, info);
+    if (rc == MX_TORN) {
+        mx_log(MODAVD_LOG_WARN, "port=%d: a new frame arrived during each of %d copies", h->console_port,
+               MX_MAX_COPY_ATTEMPTS);
+        return MODAVD_E_NOT_READY;
+    }
+    return rc;
 }
 
 /* Input arrives in the next version. */

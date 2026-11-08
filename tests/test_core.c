@@ -204,6 +204,75 @@ static void test_capture_from_fake_frame(void)
     fake_frame_destroy(&f);
 }
 
+/* The emulator writes without a lock. The hook publishes a frame after a copy,
+ * as if the emulator wrote one meanwhile. */
+typedef struct publish_state {
+    fake_frame* frame;
+    int remaining; /* how many more copies get a new frame after them */
+    int calls;
+} publish_state;
+
+static void publish_after_copy(void* user)
+{
+    publish_state* s = (publish_state*)user;
+    ++s->calls;
+    if (s->remaining > 0) {
+        --s->remaining;
+        ++((mx_video_info*)s->frame->view)->frame_number;
+    }
+}
+
+/* One new frame mid-copy: the next copy is clean. A new frame during every
+ * copy: MODAVD_E_NOT_READY rather than a frame that may mix two. */
+static void test_capture_new_frame_mid_copy(void)
+{
+    const int port = 65020;
+    const uint32_t w = 8, hgt = 4;
+    fake_frame f;
+    if (fake_frame_create(&f, port, w, hgt, w, hgt) != 0) {
+        fprintf(stderr, "cannot create the fake frame\n");
+        ++g_failures;
+        return;
+    }
+    modavd_open_params p;
+    memset(&p, 0, sizeof(p));
+    p.size = sizeof(p);
+    p.console_port = port;
+    p.flags = MODAVD_OPEN_NO_START;
+    modavd_handle h = NULL;
+    CHECK_EQ(modavd_open(&p, &h), MODAVD_OK);
+    if (h) {
+        uint8_t buf[8 * 4 * 4];
+        modavd_frame_info info;
+        memset(&info, 0, sizeof(info));
+        info.size = sizeof(info);
+        uint32_t first = ((mx_video_info*)f.view)->frame_number;
+        publish_state s = { &f, 1, 0 };
+        mx_test_after_copy = publish_after_copy;
+        mx_test_after_copy_user = &s;
+
+        CHECK_EQ(modavd_capture(h, 0, MODAVD_FMT_BGRA, 0, buf, sizeof(buf), &info), MODAVD_OK);
+        CHECK_EQ(s.calls, 2);
+        CHECK_EQ(info.frame_number, first + 1);
+
+        s.remaining = MX_MAX_COPY_ATTEMPTS;
+        s.calls = 0;
+        CHECK_EQ(modavd_capture(h, 0, MODAVD_FMT_BGRA, 0, buf, sizeof(buf), &info), MODAVD_E_NOT_READY);
+        CHECK_EQ(s.calls, MX_MAX_COPY_ATTEMPTS);
+
+        /* The shim's call: it hands the last copy over, so it needs to tell this apart. */
+        s.remaining = MX_MAX_COPY_ATTEMPTS;
+        s.calls = 0;
+        CHECK_EQ(mx_copy_frame(&h->shm, MODAVD_FMT_RGBA, MODAVD_CAPTURE_BOTTOM_UP, 0, buf, sizeof(buf), &info),
+                 MX_TORN);
+
+        mx_test_after_copy = NULL;
+        mx_test_after_copy_user = NULL;
+        modavd_close(h);
+    }
+    fake_frame_destroy(&f);
+}
+
 /* Same frame through the public call at sizes that leave every possible tail after the
  * 16- and 4-pixel blocks, top-down and bottom-up. */
 static void test_capture_odd_sizes(void)
@@ -347,6 +416,7 @@ int main(void)
     test_version_and_errors();
     test_open_errors();
     test_capture_from_fake_frame();
+    test_capture_new_frame_mid_copy();
     test_capture_odd_sizes();
     test_convert_row();
     test_log_callback();

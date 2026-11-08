@@ -46,7 +46,8 @@ enum {
     MODAVD_OK = 0,
     MODAVD_E_INVALID = -1,     /* bad argument */
     MODAVD_E_NOT_FOUND = -2,   /* nothing answers on that console port */
-    MODAVD_E_NOT_READY = -3,   /* frame sharing is off, or no frame was composed yet */
+    MODAVD_E_NOT_READY = -3,   /* frame sharing is off, no frame was composed yet, or (capture) new frames
+                                  kept arriving during the copy: try again */
     MODAVD_E_RESIZED = -4,     /* the shared frame no longer fits the mapping: close and reopen */
     MODAVD_E_BUFFER = -5,      /* buffer too small; the frame info says how big it must be */
     MODAVD_E_IO = -6,          /* an OS call failed */
@@ -141,7 +142,9 @@ MODAVD_API int modavd_console_port(modavd_handle h);      /* > 0, or MODAVD_E_IN
 
 /* Copies the latest frame of `display` (only 0 for now) into buf.
  * With buf == NULL or buf_size == 0 it only fills info (a size probe).
- * MODAVD_E_NOT_READY: no frame yet. MODAVD_E_RESIZED: reopen the handle.
+ * MODAVD_E_NOT_READY: no frame yet, or the emulator published a new frame
+ *                     during each of the copies, so buf may mix two frames;
+ *                     call again. MODAVD_E_RESIZED: reopen the handle.
  * MODAVD_E_BUFFER: buf_size < info->stride * info->height. */
 MODAVD_API int modavd_capture(modavd_handle h, int display, uint32_t format, uint32_t flags, void* buf,
                               size_t buf_size, modavd_frame_info* info);

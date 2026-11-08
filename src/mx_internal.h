@@ -31,6 +31,13 @@ typedef struct mx_video_info {
 #define MX_MAX_COPY_ATTEMPTS 3
 #define MX_DEFAULT_TIMEOUT_MS 2000
 
+/* mx_copy_frame() when the emulator published a new frame during every one
+ * of the MX_MAX_COPY_ATTEMPTS copies: the buffer may mix two frames. Internal
+ * only (positive, never a MODAVD_* code): modavd_capture() reports
+ * MODAVD_E_NOT_READY; the MuMu-shaped shim hands the last copy over, as the
+ * DLL it replaces did. */
+#define MX_TORN 1
+
 /* ---- log.c ---- */
 void mx_log(int level, const char* fmt, ...)
 #if defined(__GNUC__)
@@ -75,9 +82,16 @@ int mx_cpu_simd(void);
  * simd: the value of mx_cpu_simd(), or 0 for the portable code only. */
 void mx_convert_row(const uint8_t* src, uint8_t* dst, uint32_t width, uint32_t format, int simd);
 
-/* Copies one frame; the work behind modavd_capture(). */
+/* Copies one frame; the work behind modavd_capture(). MODAVD_OK, a MODAVD_E_*
+ * code, or MX_TORN. */
 int mx_copy_frame(const mx_shm* shm, uint32_t format, uint32_t flags, int simd, void* buf, size_t buf_size,
                   modavd_frame_info* info);
+
+/* Tests only: when set, mx_copy_frame() calls it after each copy, before it
+ * reads the frame number again, so a test can publish a frame mid-copy. NULL
+ * everywhere else. */
+extern void (*mx_test_after_copy)(void* user);
+extern void* mx_test_after_copy_user;
 
 #ifdef __cplusplus
 }
