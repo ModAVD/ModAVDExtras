@@ -38,6 +38,13 @@ typedef struct mx_video_info {
  * DLL it replaces did. */
 #define MX_TORN 1
 
+/* mx_copy_frame() flag, internal only (modavd_capture() clears it): copy the
+ * frame even if the emulator has not published one yet (timestamp 0). The
+ * region then holds the size and a black frame. The MuMu-shaped shim uses
+ * it, as the DLL it replaces did: a failed capture makes MaaCore give up on
+ * this path or rerun its screencap speed test. */
+#define MX_CAPTURE_UNPUBLISHED (1u << 31)
+
 /* ---- log.c ---- */
 void mx_log(int level, const char* fmt, ...)
 #if defined(__GNUC__)

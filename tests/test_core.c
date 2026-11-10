@@ -232,6 +232,13 @@ static void test_capture_before_first_frame(void)
                 CHECK_EQ(buf[i], 0xA5);
             }
         }
+        /* The shim's internal flag is not part of the public API. */
+        CHECK_EQ(modavd_capture(h, 0, MODAVD_FMT_BGRA, MX_CAPTURE_UNPUBLISHED, buf, sizeof(buf), &info),
+                 MODAVD_E_NOT_READY);
+        /* The shim's own call copies the unpublished frame. */
+        CHECK_EQ(mx_copy_frame(&h->shm, MODAVD_FMT_BGRA, MX_CAPTURE_UNPUBLISHED, 0, buf, sizeof(buf), &info),
+                 MODAVD_OK);
+        CHECK_EQ(info.timestamp_us, 0);
 
         /* A counter may wrap to zero. A published, unchanged black frame is valid. */
         vi->ts_us = 123456789ull;

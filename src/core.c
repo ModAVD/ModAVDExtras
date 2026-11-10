@@ -311,7 +311,7 @@ int mx_copy_frame(const mx_shm* shm, uint32_t format, uint32_t flags, int simd, 
     info->timestamp_us = vi->ts_us;
     /* Dimensions are set before the first frame is published. The counter
      * can wrap to zero, and a published static frame need not advance. */
-    if (w == 0 || h == 0 || info->timestamp_us == 0) {
+    if (w == 0 || h == 0 || (info->timestamp_us == 0 && !(flags & MX_CAPTURE_UNPUBLISHED))) {
         return MODAVD_E_NOT_READY;
     }
     if (MX_HEADER_SIZE + (uint64_t)w * h * 4 > shm->size) {
@@ -356,7 +356,7 @@ int modavd_capture(modavd_handle h, int display, uint32_t format, uint32_t flags
     if (display != 0) {
         return MODAVD_E_UNSUPPORTED;
     }
-    int rc = mx_copy_frame(&h->shm, format, flags, h->simd, buf, buf_size, info);
+    int rc = mx_copy_frame(&h->shm, format, flags & ~MX_CAPTURE_UNPUBLISHED, h->simd, buf, buf_size, info);
     if (rc == MX_TORN) {
         mx_log(MODAVD_LOG_WARN, "port=%d: a new frame arrived during each of %d copies", h->console_port,
                MX_MAX_COPY_ATTEMPTS);

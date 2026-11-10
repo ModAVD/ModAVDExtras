@@ -96,6 +96,17 @@ int main(int argc, char** argv)
     CHECK(nemu_capture_display(handle, 0, (int)size, &cw, &ch, buf) == -2);
     fake_frame_set_size(&f, w, h);
 
+    /* Started but not published yet: the size and the frame as they are, like
+     * the DLL this replaces; MaaCore's connect asks for the size right away. */
+    mx_video_info* vi = (mx_video_info*)f.view;
+    uint64_t ts = vi->ts_us;
+    vi->ts_us = 0;
+    cw = ch = 0;
+    CHECK(nemu_capture_display(handle, 0, 0, &cw, &ch, NULL) == 0);
+    CHECK(cw == (int)w && ch == (int)h);
+    CHECK(nemu_capture_display(handle, 0, (int)size, &cw, &ch, buf) == 0);
+    vi->ts_us = ts;
+
     nemu_disconnect(handle);
     CHECK(nemu_capture_display(handle, 0, 0, &cw, &ch, NULL) == -1);
     free(buf);
