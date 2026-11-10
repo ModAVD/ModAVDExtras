@@ -3,7 +3,7 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, "release/**"]
   merge_group:
   workflow_dispatch:
 
@@ -31,6 +31,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "tests failed" }
           # In the format of release/<version>.SHA256SUMS.txt.
           Get-ChildItem build\Release\*.dll | Sort-Object Name | ForEach-Object { '{0}  {1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name }
+      - name: Upload the Windows libraries
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-libs
+          path: |
+            build/Release/modavd_extras.dll
+            build/Release/external_renderer_ipc.dll
+          if-no-files-found: error
 
   posix:
     strategy:
