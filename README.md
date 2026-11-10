@@ -46,13 +46,15 @@ if (modavd_open(&p, &h) == MODAVD_OK) {
     modavd_capture(h, 0, MODAVD_FMT_BGR, 0, NULL, 0, &info);          /* 先问尺寸 */
     void* buf = malloc((size_t)info.stride * info.height);
     int rc = modavd_capture(h, 0, MODAVD_FMT_BGR, 0, buf, (size_t)info.stride * info.height, &info);
-    /* rc: MODAVD_OK；MODAVD_E_NOT_READY 还没有画面；MODAVD_E_RESIZED 要重新 open */
+    /* rc: MODAVD_OK；MODAVD_E_NOT_READY 还没有画面（刚开流、第一帧没到时也是这样，稍后再调）；
+     *     MODAVD_E_RESIZED 要重新 open */
     free(buf);
     modavd_close(h);
 }
 ```
 
 - 所有函数返回 `MODAVD_OK`（0）或负的 `MODAVD_E_*`。
+- Linux、macOS 上 `modavd_open` 默认先经控制台开流（`screenrecord webrtc start`），所以控制台要连得上、鉴权要能过；模拟器退出后旧的共享内存可能还在，不开流会拿到上次的旧画面。确定映射属于当前实例而且已经在开流的，可以带 `MODAVD_OPEN_NO_START` 跳过控制台。
 - 结构体开头是 `size`，以后加字段不破坏旧的调用方。
 - `modavd_api_version()` 每加一个函数就加一，函数从不删。`modavd_capabilities()` 说明这个实例能做哪些事。
 - `modavd_frame_info` 里有帧号和时间戳：调用方可以据此跳过重复帧，也能分清「画面没变」和「模拟器卡住」。
