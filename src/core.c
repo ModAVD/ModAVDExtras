@@ -102,13 +102,26 @@ int modavd_open(const modavd_open_params* params, modavd_handle* out)
     }
     int timeout_ms = params->timeout_ms > 0 ? params->timeout_ms : MX_DEFAULT_TIMEOUT_MS;
 
+#ifndef _WIN32
+    /* POSIX names can outlive their producer. Confirm sharing before opening
+     * the name, since the new emulator may replace the stale object on start.
+     * Repeated starts reuse the active stream. NO_START trusts the mapping. */
+    if (!(params->flags & MODAVD_OPEN_NO_START)) {
+        int console = mx_console_command(port, "screenrecord webrtc start", 3000);
+        if (console != MODAVD_OK) {
+            return console;
+        }
+    }
+#endif
     mx_shm shm = { 0 };
     int rc = mx_shm_open(port, &shm);
     if (rc == MODAVD_E_NOT_READY && !(params->flags & MODAVD_OPEN_NO_START)) {
+#ifdef _WIN32
         int console = mx_console_command(port, "screenrecord webrtc start", 3000);
         if (console == MODAVD_E_NOT_FOUND) {
             return MODAVD_E_NOT_FOUND;
         }
+#endif
         for (int waited = 0; rc == MODAVD_E_NOT_READY && waited < timeout_ms; waited += 50) {
             sleep_ms(50);
             rc = mx_shm_open(port, &shm);
@@ -296,7 +309,9 @@ int mx_copy_frame(const mx_shm* shm, uint32_t format, uint32_t flags, int simd, 
     info->format = format;
     info->frame_number = vi->frame_number;
     info->timestamp_us = vi->ts_us;
-    if (w == 0 || h == 0) {
+    /* Dimensions are set before the first frame is published. The counter
+     * can wrap to zero, and a published static frame need not advance. */
+    if (w == 0 || h == 0 || info->timestamp_us == 0) {
         return MODAVD_E_NOT_READY;
     }
     if (MX_HEADER_SIZE + (uint64_t)w * h * 4 > shm->size) {

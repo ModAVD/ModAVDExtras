@@ -55,6 +55,13 @@ target_link_libraries(test_core PRIVATE mx_core)
 mx_link_system(test_core)
 add_test(NAME test_core COMMAND test_core)
 
+if(NOT WIN32)
+  add_executable(test_open_posix tests/test_open_posix.c)
+  target_link_libraries(test_open_posix PRIVATE mx_core)
+  mx_link_system(test_open_posix)
+  add_test(NAME test_open_posix COMMAND test_open_posix)
+endif()
+
 if(WIN32)
   # external_renderer_ipc.dll: the compatibility shell for MaaCore's MuMu path.
   add_library(external_renderer_ipc SHARED shim/mumu_shim.c)

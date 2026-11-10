@@ -71,7 +71,8 @@ enum {
 
 /* modavd_open_params.flags */
 enum {
-    /* Do not ask the emulator console to start frame sharing when it is off. */
+    /* Only open the shared mapping, without contacting the console. The caller
+     * must ensure it belongs to the current emulator and sharing is active. */
     MODAVD_OPEN_NO_START = 1u << 0,
 };
 
@@ -129,6 +130,10 @@ MODAVD_API void modavd_set_log(modavd_log_fn fn, void* user);
 MODAVD_API int modavd_parse_console_port(const char* adb_address);
 
 /* Connects to an instance. On success *out is a handle for modavd_close().
+ * On POSIX, unless NO_START is set, confirms sharing through the console before
+ * opening the mapping: named regions can survive an emulator restart. Console
+ * auth/command failures return MODAVD_E_IO, even if an old mapping exists.
+ * The first frame may not have arrived yet; capture then returns NOT_READY.
  * MODAVD_E_NOT_FOUND: frame sharing is off and nothing answers on the console port.
  * MODAVD_E_NOT_READY: the console answered (or MODAVD_OPEN_NO_START is set) but
  *                     frame sharing did not come up in time. */

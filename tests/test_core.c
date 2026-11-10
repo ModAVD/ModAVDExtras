@@ -204,6 +204,55 @@ static void test_capture_from_fake_frame(void)
     fake_frame_destroy(&f);
 }
 
+static void test_capture_before_first_frame(void)
+{
+    fake_frame f;
+    if (fake_frame_create(&f, 65012, 8, 4, 8, 4) != 0) {
+        ++g_failures;
+        return;
+    }
+    modavd_open_params p = { 0 };
+    p.size = sizeof(p);
+    p.console_port = f.port;
+    p.flags = MODAVD_OPEN_NO_START;
+    modavd_handle h = NULL;
+    CHECK_EQ(modavd_open(&p, &h), MODAVD_OK);
+    if (h) {
+        mx_video_info* vi = (mx_video_info*)f.view;
+        vi->frame_number = 0;
+        vi->ts_us = 0;
+        uint8_t buf[8 * 4 * 4];
+        modavd_frame_info info = { 0 };
+        info.size = sizeof(info);
+        for (uint32_t format = MODAVD_FMT_BGRA; format <= MODAVD_FMT_RGBA; ++format) {
+            CHECK_EQ(modavd_capture(h, 0, format, 0, NULL, 0, &info), MODAVD_E_NOT_READY);
+            memset(buf, 0xA5, sizeof(buf));
+            CHECK_EQ(modavd_capture(h, 0, format, 0, buf, sizeof(buf), &info), MODAVD_E_NOT_READY);
+            for (size_t i = 0; i < sizeof(buf); ++i) {
+                CHECK_EQ(buf[i], 0xA5);
+            }
+        }
+
+        /* A counter may wrap to zero. A published, unchanged black frame is valid. */
+        vi->ts_us = 123456789ull;
+        memset(f.view + MX_HEADER_SIZE, 0, 8 * 4 * 4);
+        for (int i = 0; i < 2; ++i) {
+            CHECK_EQ(modavd_capture(h, 0, MODAVD_FMT_BGRA, 0, buf, sizeof(buf), &info), MODAVD_OK);
+            CHECK_EQ(info.frame_number, 0);
+            CHECK_EQ(info.timestamp_us, 123456789ull);
+            for (size_t j = 0; j < sizeof(buf); ++j) {
+                CHECK_EQ(buf[j], 0);
+            }
+        }
+        /* The counter alone does not mean the timestamp was published yet. */
+        vi->frame_number = 1;
+        vi->ts_us = 0;
+        CHECK_EQ(modavd_capture(h, 0, MODAVD_FMT_BGRA, 0, buf, sizeof(buf), &info), MODAVD_E_NOT_READY);
+        modavd_close(h);
+    }
+    fake_frame_destroy(&f);
+}
+
 /* The emulator writes without a lock. The hook publishes a frame after a copy,
  * as if the emulator wrote one meanwhile. */
 typedef struct publish_state {
@@ -416,6 +465,7 @@ int main(void)
     test_version_and_errors();
     test_open_errors();
     test_capture_from_fake_frame();
+    test_capture_before_first_frame();
     test_capture_new_frame_mid_copy();
     test_capture_odd_sizes();
     test_convert_row();
