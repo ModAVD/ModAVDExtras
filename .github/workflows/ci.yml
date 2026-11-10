@@ -51,6 +51,16 @@ jobs:
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
           cmake --build build
           ctest --test-dir build --output-on-failure
+          # In the format of release/<version>.SHA256SUMS.txt, and what the library needs from the system.
+          cd build
+          if [ "$RUNNER_OS" = macOS ]; then
+            lib=libmodavd_extras.dylib
+            otool -l "$lib" | grep -A3 LC_BUILD_VERSION | grep minos
+          else
+            lib=libmodavd_extras.so
+            objdump -T "$lib" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1
+          fi
+          cmake -E sha256sum "$lib"
 
   privacy:
     runs-on: ubuntu-24.04

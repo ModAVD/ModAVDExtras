@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
-project(ModAVDExtras VERSION 0.1.1 LANGUAGES C)
+# macOS: the oldest release the library loads on. Without it the build machine's SDK version is used.
+set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING "Minimum macOS version")
+project(ModAVDExtras VERSION 0.1.2 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)

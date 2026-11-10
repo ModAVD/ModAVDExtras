@@ -11,10 +11,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
+  check:
     if: github.repository == 'ModAVD/ModAVDExtras' && !github.event.deleted
-    runs-on: windows-2025
-    timeout-minutes: 20
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -22,7 +22,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      - name: verify tag, ancestry and version
+      - name: verify tag, ancestry, version and the hash list
         shell: pwsh
         env:
           TAG: ${{ github.ref_name }}
@@ -37,6 +37,24 @@ jobs:
           if ($found.Count -ne 1) { throw "expected one project(ModAVDExtras VERSION ...) line in CMakeLists.txt, found $($found.Count)" }
           $want = $found[0].Matches[0].Groups[1].Value
           if ($want -cne $version) { throw "CMakeLists.txt version=$want, tag=$version" }
+          # Exactly one line per release file, sorted by name, as the CI jobs print them.
+          $names = @('external_renderer_ipc.dll', 'libmodavd_extras.dylib', 'libmodavd_extras.so', 'modavd_extras.dll')
+          $sums = Get-Content -Raw "release/$version.SHA256SUMS.txt"
+          $pattern = '\A' + (($names | ForEach-Object { '[0-9a-f]{64}  ' + [regex]::Escape($_) + '\n' }) -join '') + '\z'
+          if ($sums -cnotmatch $pattern) { throw "release/$version.SHA256SUMS.txt must be one '<sha256>  <name>' line for each of: $($names -join ', ')" }
+          # The notes are written before CI prints the hashes, with @NAME@ where they go.
+          if ((Get-Content -Raw "release/$version.md") -cmatch '@[A-Z_]+@') { throw "release/$version.md still has a placeholder: $($Matches[0])" }
+
+  windows:
+    needs: check
+    runs-on: windows-2025
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: build, test and verify
         shell: pwsh
         env:
@@ -50,22 +68,60 @@ jobs:
           ctest --test-dir build -C Release --output-on-failure
           if ($LASTEXITCODE -ne 0) { throw 'tests failed' }
           $version = $env:TAG.Substring(1)
-          # The list must be exactly these lines, in this order: what ci.yml prints for the same build.
-          $names = @('external_renderer_ipc.dll', 'modavd_extras.dll')
-          $lines = foreach ($name in $names) { '{0}  {1}' -f (Get-FileHash "build/Release/$name" -Algorithm SHA256).Hash.ToLowerInvariant(), $name }
-          $lines
-          if ((Get-Content -Raw "release/$version.SHA256SUMS.txt") -cne (($lines -join "`n") + "`n")) { throw "release/$version.SHA256SUMS.txt must be exactly the lines above" }
+          $sums = (Get-Content -Raw "release/$version.SHA256SUMS.txt") -split "`n"
           New-Item -ItemType Directory -Force artifacts | Out-Null
-          foreach ($name in $names) { Copy-Item "build/Release/$name" artifacts }
-          Copy-Item "release/$version.SHA256SUMS.txt" artifacts/SHA256SUMS.txt
+          foreach ($name in 'external_renderer_ipc.dll', 'modavd_extras.dll') {
+            $line = '{0}  {1}' -f (Get-FileHash "build/Release/$name" -Algorithm SHA256).Hash.ToLowerInvariant(), $name
+            $line
+            if ($sums -cnotcontains $line) { throw "release/$version.SHA256SUMS.txt does not have this line" }
+            Copy-Item "build/Release/$name" artifacts
+          }
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: release-assets
+          name: release-windows
+          path: artifacts
+          if-no-files-found: error
+
+  posix:
+    needs: check
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: build, test and verify
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # The same build as ci.yml's posix job.
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+          ctest --test-dir build --output-on-failure
+          if [ "$RUNNER_OS" = macOS ]; then lib=libmodavd_extras.dylib; else lib=libmodavd_extras.so; fi
+          line="$(cd build && cmake -E sha256sum "$lib")"
+          echo "$line"
+          if ! grep -Fxq -- "$line" "release/${TAG#v}.SHA256SUMS.txt"; then
+            echo "release/${TAG#v}.SHA256SUMS.txt does not have this line" >&2
+            exit 1
+          fi
+          mkdir artifacts
+          cp "build/$lib" artifacts/
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-${{ matrix.os }}
           path: artifacts
           if-no-files-found: error
 
   draft:
-    needs: build
+    needs: [windows, posix]
     runs-on: windows-2025
     timeout-minutes: 10
     permissions:
@@ -77,26 +133,27 @@ jobs:
           fetch-depth: 1
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: release-assets
+          pattern: release-*
           path: artifacts
-      - name: verify artifact
+          merge-multiple: true
+      - name: verify artifacts
         shell: pwsh
         env:
           TAG: ${{ github.ref_name }}
         run: |
-          # Checked against the tag's own list, not only the copy that travelled with the artifact.
+          # Checked against the tag's own list, not only what the build jobs reported.
           $version = $env:TAG.Substring(1)
           $sums = Get-Content -Raw "release/$version.SHA256SUMS.txt"
-          if ((Get-Content -Raw artifacts/SHA256SUMS.txt) -cne $sums) { throw 'artifact SHA256SUMS.txt differs from the tag' }
-          $names = @('external_renderer_ipc.dll', 'modavd_extras.dll')
+          $names = @('external_renderer_ipc.dll', 'libmodavd_extras.dylib', 'libmodavd_extras.so', 'modavd_extras.dll')
           $have = (Get-ChildItem artifacts -File | ForEach-Object Name | Sort-Object) -join ','
-          $expect = (@($names + 'SHA256SUMS.txt') | Sort-Object) -join ','
+          $expect = ($names | Sort-Object) -join ','
           if ($have -cne $expect) { throw "unexpected artifact files: $have" }
           foreach ($name in $names) {
             $want = [regex]::Match($sums, "(?m)^([0-9a-f]{64})  $([regex]::Escape($name))\r?$").Groups[1].Value
             $got = (Get-FileHash "artifacts/$name" -Algorithm SHA256).Hash.ToLowerInvariant()
             if (-not $want -or $got -ne $want) { throw "downloaded $name hash mismatch" }
           }
+          Copy-Item "release/$version.SHA256SUMS.txt" artifacts/SHA256SUMS.txt
       - name: create draft
         shell: pwsh
         env:
@@ -109,11 +166,12 @@ jobs:
           $tags = gh api "repos/$env:GH_REPO/releases?per_page=100" --paginate --jq '.[].tag_name'
           if ($LASTEXITCODE -ne 0) { throw 'cannot list releases' }
           if ($tags -contains $env:TAG) { throw "a release for $env:TAG already exists (draft or published)" }
-          # --verify-tag only checks that the tag exists: make sure it still points at the commit the build job built.
+          # --verify-tag only checks that the tag exists: make sure it still points at the commit the build jobs built.
           $head = git rev-parse HEAD
           if ($LASTEXITCODE -ne 0) { throw 'git rev-parse failed' }
           $tagCommit = gh api "repos/$env:GH_REPO/commits/tags/$env:TAG" --jq .sha
           if ($LASTEXITCODE -ne 0) { throw "cannot resolve $env:TAG" }
           if ($tagCommit -ne $head) { throw "$env:TAG now points at $tagCommit; this run built $head" }
-          gh release create $env:TAG --draft --verify-tag --notes-file "release/$version.md" artifacts/modavd_extras.dll artifacts/external_renderer_ipc.dll artifacts/SHA256SUMS.txt
+          $files = @('modavd_extras.dll', 'external_renderer_ipc.dll', 'libmodavd_extras.so', 'libmodavd_extras.dylib', 'SHA256SUMS.txt') | ForEach-Object { "artifacts/$_" }
+          gh release create $env:TAG --draft --verify-tag --notes-file "release/$version.md" @files
           if ($LASTEXITCODE -ne 0) { throw 'gh release create failed' }
