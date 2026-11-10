@@ -42,6 +42,8 @@ jobs:
           $sums = Get-Content -Raw "release/$version.SHA256SUMS.txt"
           $pattern = '\A' + (($names | ForEach-Object { '[0-9a-f]{64}  ' + [regex]::Escape($_) + '\n' }) -join '') + '\z'
           if ($sums -cnotmatch $pattern) { throw "release/$version.SHA256SUMS.txt must be one '<sha256>  <name>' line for each of: $($names -join ', ')" }
+          # The notes are written before CI prints the hashes, with @NAME@ where they go.
+          if ((Get-Content -Raw "release/$version.md") -cmatch '@[A-Z_]+@') { throw "release/$version.md still has a placeholder: $($Matches[0])" }
 
   windows:
     needs: check
