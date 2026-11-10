@@ -28,7 +28,9 @@
 
 - v0.1：只有截图。点击、按键、文字的函数已经声明，现在返回 `MODAVD_E_UNSUPPORTED`。
 - Windows：截图这套逻辑在 ModAVD 上已经用了一个多月，形式是下面的兼容外壳。
-- Linux、macOS：能编，单元测试在 CI 上跑；还没有在模拟器上实测。
+- macOS（Apple Silicon）：11-09 有贡献者用官方 Emulator 37.2.13、API 35 ARM64 实测过截图。
+- Linux：能编，单元测试在 CI 上跑；还没有在模拟器上实测。
+- [Release](https://github.com/ModAVD/ModAVDExtras/releases) 从 v0.1.2 起带三个平台的库：Windows x64 的 `modavd_extras.dll`、macOS arm64 的 `libmodavd_extras.dylib`、Linux x64 的 `libmodavd_extras.so`，外壳 `external_renderer_ipc.dll` 只有 Windows 版。
 
 ## 接口
 
@@ -109,5 +111,6 @@ ModAVDExtras is a small C library that reads the screen of a [ModAVD](https://gi
 - The library finds the console port from an adb address, starts frame sharing through the console when it is off, copies a frame in the format the caller asks for (copying again if a new frame arrived meanwhile), and reports whether capture is usable. It never falls back to adb by itself.
 - Version 0.1 does screen capture only; the input functions are declared and return `MODAVD_E_UNSUPPORTED`. See [include/modavd_extras.h](include/modavd_extras.h).
 - `external_renderer_ipc.dll` is a Windows-only compatibility shell. It exports the four capture functions that MaaCore looks up in MuMu's DLL, on top of the same code, so MaaCore versions that do not know ModAVD can still capture from it. AUTO-MAS uses it today. It will be retired once MaaCore can connect to ModAVD directly.
+- Status: Windows has used this capture code for over a month through the shell below; on Apple Silicon macOS a contributor tested capture with the official Emulator 37.2.13 and API 35 ARM64; Linux builds and passes the unit tests in CI but has not been tested with an emulator. From v0.1.2 the [releases](https://github.com/ModAVD/ModAVDExtras/releases) carry `modavd_extras.dll` (Windows x64), `libmodavd_extras.dylib` (macOS arm64) and `libmodavd_extras.so` (Linux x64), plus the Windows-only shell.
 - Build: `build.ps1` on Windows (Visual Studio 2022 Build Tools, CMake, Ninja); CMake on Linux and macOS. The unit tests need no emulator.
 - License: LGPL-3.0-or-later ([LICENSE](LICENSE), [COPYING](COPYING)). Only code written for this project goes in; code from GPL or AGPL projects such as MaaCore does not.
