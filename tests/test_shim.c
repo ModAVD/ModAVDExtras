@@ -114,6 +114,82 @@ int main(int argc, char** argv)
     /* No frame on that port and nothing listens: connect fails with 0. */
     CHECK(nemu_connect(scratch, 65021) == 0);
 
+    /* An instance number (as a user types it into MAA): the console port is on
+     * the port plan of the root that the MuMu path sits in, <root>\mumu-shim.
+     * Plan 1100 and index 3000: port 31100, while the default plan would give
+     * 50000; neither is near a real instance's ports (20000.., 21000..), so a
+     * wrong plan only fails to connect and never reaches a running emulator. */
+    {
+        const int base = 1100, index = 3000;
+        fake_frame g;
+        if (fake_frame_create(&g, base + 10 * index, w, h, w, h) != 0) {
+            fprintf(stderr, "cannot create the second fake frame\n");
+            return 1;
+        }
+        char dir[MAX_PATH], json[MAX_PATH];
+        snprintf(dir, sizeof(dir), "%s\\root\\mumu-shim", argv[2]);
+        snprintf(json, sizeof(json), "%s\\root\\mas-avd.json", argv[2]);
+        char parent[MAX_PATH];
+        snprintf(parent, sizeof(parent), "%s\\root", argv[2]);
+        CreateDirectoryA(parent, NULL);
+        CreateDirectoryA(dir, NULL);
+        wchar_t wdir[MAX_PATH];
+        MultiByteToWideChar(CP_UTF8, 0, dir, -1, wdir, MAX_PATH);
+        static const char* plans[] = {
+            "{\"portBase\": 1100}",
+            "\xEF\xBB\xBF{\r\n  \"components\": {},\r\n  \"portBase\" :\r\n 1100,\r\n  \"instances\": {}\r\n}",
+        };
+        for (size_t k = 0; k < sizeof(plans) / sizeof(plans[0]); ++k) {
+            FILE* jf = fopen(json, "wb");
+            CHECK(jf != NULL);
+            if (jf) {
+                fputs(plans[k], jf);
+                fclose(jf);
+            }
+            int hi = nemu_connect(wdir, index);
+            CHECK(hi > 0);
+            CHECK(nemu_capture_display(hi, 0, 0, &cw, &ch, NULL) == 0 && cw == (int)w && ch == (int)h);
+            nemu_disconnect(hi);
+            /* a trailing separator on the MuMu path names the same root */
+            wchar_t slash[MAX_PATH];
+            swprintf(slash, MAX_PATH, L"%ls\\", wdir);
+            hi = nemu_connect(slash, index);
+            CHECK(hi > 0);
+            nemu_disconnect(hi);
+        }
+        /* A portBase ModAVD does not accept is not taken: the plan falls back to 20000 (port 50000, no frame).
+         * Frames wait where taking 1150 or 1000 would land, so taking them shows. */
+        fake_frame g1150, g1000;
+        if (fake_frame_create(&g1150, 1150 + 10 * index, w, h, w, h) != 0 ||
+            fake_frame_create(&g1000, 1000 + 10 * index, w, h, w, h) != 0) {
+            fprintf(stderr, "cannot create the fake frames for refused plans\n");
+            return 1;
+        }
+        static const char* bad_plans[] = { "{\"portBase\": 1150}", "{\"portBase\": 1100000}", "{\"portBase\": 1100.5}",
+                                           "{\"portBase\": \"1100\"}", "{\"portBase\": 1000}", "{\"portBase\": 65500}",
+                                           "{\"portbase\": 1100}" };
+        for (size_t k = 0; k < sizeof(bad_plans) / sizeof(bad_plans[0]); ++k) {
+            FILE* jf = fopen(json, "wb");
+            CHECK(jf != NULL);
+            if (jf) {
+                fputs(bad_plans[k], jf);
+                fclose(jf);
+            }
+            int hi = nemu_connect(wdir, index);
+            if (hi > 0) {
+                fprintf(stderr, "portBase %s was taken\n", bad_plans[k]);
+                ++g_failures;
+                nemu_disconnect(hi);
+            }
+        }
+        fake_frame_destroy(&g1150);
+        fake_frame_destroy(&g1000);
+        fake_frame_destroy(&g);
+        remove(json);
+        RemoveDirectoryA(dir);
+        RemoveDirectoryA(parent);
+    }
+
     FILE* lf = fopen(log_path, "rb");
     CHECK(lf != NULL);
     if (lf) {
