@@ -68,6 +68,7 @@ if (modavd_open(&p, &h) == MODAVD_OK) {
 - 本仓库编出的同名 DLL 就导出这四个函数，内部用的是同一套截图代码（静态编进去，不依赖 `modavd_extras.dll`）。
 - 它不导出输入函数，所以 MaaCore 照旧用 MaaTouch 点击。
 - AUTO-MAS 现在就是这样让 MAA 接 ModAVD 的：把这个 DLL 放进一个目录，在 MAA 里把它当作 MuMu 的安装路径，实例编号填控制台端口。这个外壳替换的是 AUTO-MAS 仓库里原来的 `res/avdshim`，行为不变。
+- 实例编号也可以直接填 ModAVD 的编号（0–9）。外壳放在 `<ModAVD 根目录>\mumu-shim\shell\sdk\` 时，按根目录 `mas-avd.json` 的 `portBase` 算控制台端口（没写就是 20000），即 `portBase + 10×编号`。
 - 等 MaaCore 有了 ModAVD 自己的连接方式，这个外壳就退场。
 
 只能在 Windows 上用。

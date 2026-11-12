@@ -9,7 +9,9 @@
  * ModAVD instance's shared frame. It replaces the earlier avdshim and behaves
  * the same way:
  *
- * - nemu_connect(path, index) maps index to the console port (index_to_port),
+ * - nemu_connect(path, index) maps index to the console port (index_to_port:
+ *   the console port itself, or the ModAVD instance number on the port plan
+ *   of the root that path is in),
  *   writes its log to <path>\avdshim.log and starts frame sharing through the
  *   console when it is off.
  * - nemu_capture_display returns 0 on success, RGBA rows bottom-up (MaaCore
@@ -84,11 +86,70 @@ static void core_log(int level, const char* msg, void* user)
     }
 }
 
+/* The port plan of the ModAVD root the shell sits in. ModAVD ships it as
+ * <root>\mumu-shim\shell\sdk\external_renderer_ipc.dll and MAA's MuMu path is
+ * <root>\mumu-shim, so the root is the parent of path: its mas-avd.json
+ * "portBase" when that is an integer multiple of 100 in 1100..65400 (the
+ * plans ModAVD accepts), else 20000. Only that one key is read, by a plain
+ * scan: the file is ModAVD's own and portBase is a number there. */
+static int root_port_base(const wchar_t* path)
+{
+    if (!path || !path[0]) {
+        return DEFAULT_PORT_BASE;
+    }
+    size_t n = wcslen(path);
+    while (n > 0 && (path[n - 1] == L'\\' || path[n - 1] == L'/')) {
+        --n;
+    }
+    while (n > 0 && path[n - 1] != L'\\' && path[n - 1] != L'/') {
+        --n;
+    }
+    if (n == 0 || n + 16 >= MAX_PATH) {
+        return DEFAULT_PORT_BASE;
+    }
+    wchar_t file[MAX_PATH];
+    wmemcpy(file, path, n);
+    wcscpy(file + n, L"mas-avd.json");
+    FILE* f = _wfopen(file, L"rb");
+    if (!f) {
+        return DEFAULT_PORT_BASE;
+    }
+    static char text[65536];
+    size_t len = fread(text, 1, sizeof(text) - 1, f);
+    fclose(f);
+    text[len] = 0;
+    const char* p = strstr(text, "\"portBase\"");
+    if (!p) {
+        return DEFAULT_PORT_BASE;
+    }
+    p += strlen("\"portBase\"");
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
+        ++p;
+    }
+    if (*p++ != ':') {
+        return DEFAULT_PORT_BASE;
+    }
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
+        ++p;
+    }
+    long base = 0;
+    int digits = 0;
+    while (*p >= '0' && *p <= '9' && digits < 6) {
+        base = base * 10 + (*p++ - '0');
+        ++digits;
+    }
+    if (!digits || *p == '.' || *p == 'e' || *p == 'E' || base % 100 != 0 || base < 1100 ||
+        base > 65400) {
+        return DEFAULT_PORT_BASE;
+    }
+    return (int)base;
+}
+
 /*   index >= 20000                     -> index is the emulator console port (what AUTO-MAS passes)
  *   5554 + 2 * index in 20000..20100   -> MAA's GUI derives index = (port - 5554) / 2 from "emulator-<port>"
  *   index >= 5554                      -> index is the emulator console port
- *   otherwise                          -> AUTO-MAS native index, console port = 20000 + 10 * index */
-static int index_to_port(int index)
+ *   otherwise                          -> the ModAVD instance number: console port = <root's portBase> + 10 * index */
+static int index_to_port(const wchar_t* path, int index)
 {
     if (index >= 20000) {
         return index;
@@ -97,7 +158,7 @@ static int index_to_port(int index)
         int maa = 5554 + 2 * index;
         return (maa >= 20000 && maa <= 20100) ? maa : index;
     }
-    return DEFAULT_PORT_BASE + PORT_STEP * index;
+    return root_port_base(path) + PORT_STEP * index;
 }
 
 static modavd_handle get_slot(int handle)
@@ -115,7 +176,7 @@ EXPORT int nemu_connect(const wchar_t* path, int index)
         wcscat(g_log_path, L"\\avdshim.log");
     }
     modavd_set_log(core_log, NULL);
-    int port = index_to_port(index);
+    int port = index_to_port(path, index);
 
     EnterCriticalSection(&g_lock);
     int handle = 0;
