@@ -28,7 +28,7 @@ if(NOT WIN32)
   endif()
 endif()
 
-set(MX_SOURCES src/core.c src/shm.c src/console.c src/input.c src/log.c)
+set(MX_SOURCES src/core.c src/shm.c src/console.c src/console_command.c src/input.c src/log.c)
 
 if(NOT WIN32)
   # POSIX: the per-handle input lock.

@@ -84,7 +84,12 @@ static struct {
 static void record(const char* line)
 {
     if (g_con.count < MAX_LINES) {
-        snprintf(g_con.lines[g_con.count], sizeof(g_con.lines[0]), "%s", line);
+        size_t n = strlen(line);
+        if (n >= sizeof(g_con.lines[0])) {
+            n = sizeof(g_con.lines[0]) - 1;
+        }
+        memcpy(g_con.lines[g_con.count], line, n);
+        g_con.lines[g_con.count][n] = '\0';
         g_con.count = g_con.count + 1;
     }
 }
