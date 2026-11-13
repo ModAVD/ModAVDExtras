@@ -133,10 +133,14 @@ int modavd_open(const modavd_open_params* params, modavd_handle* out)
     }
 
     struct modavd_instance* inst = (struct modavd_instance*)calloc(1, sizeof(*inst));
-    if (!inst) {
+    struct mx_input* input = mx_input_create(port);
+    if (!inst || !input) {
+        free(inst);
+        mx_input_destroy(input);
         mx_shm_close(&shm);
         return MODAVD_E_IO;
     }
+    inst->input = input;
     inst->console_port = port;
     inst->simd = mx_cpu_simd();
     inst->shm = shm;
@@ -152,11 +156,13 @@ void modavd_close(modavd_handle h)
     if (!h) {
         return;
     }
+    /* Lifts the contacts this handle left down. */
+    mx_input_destroy(h->input);
     mx_shm_close(&h->shm);
     free(h);
 }
 
-uint32_t modavd_capabilities(modavd_handle h) { return h ? MODAVD_CAP_SCREENCAP : 0; }
+uint32_t modavd_capabilities(modavd_handle h) { return h ? MODAVD_CAP_SCREENCAP | MODAVD_CAP_TOUCH : 0; }
 
 int modavd_console_port(modavd_handle h) { return h ? h->console_port : MODAVD_E_INVALID; }
 
@@ -363,41 +369,4 @@ int modavd_capture(modavd_handle h, int display, uint32_t format, uint32_t flags
         return MODAVD_E_NOT_READY;
     }
     return rc;
-}
-
-/* Input arrives in the next version. */
-int modavd_touch_down(modavd_handle h, int display, int contact, int x, int y, int pressure)
-{
-    (void)h, (void)display, (void)contact, (void)x, (void)y, (void)pressure;
-    return MODAVD_E_UNSUPPORTED;
-}
-
-int modavd_touch_move(modavd_handle h, int display, int contact, int x, int y, int pressure)
-{
-    (void)h, (void)display, (void)contact, (void)x, (void)y, (void)pressure;
-    return MODAVD_E_UNSUPPORTED;
-}
-
-int modavd_touch_up(modavd_handle h, int display, int contact)
-{
-    (void)h, (void)display, (void)contact;
-    return MODAVD_E_UNSUPPORTED;
-}
-
-int modavd_touch_release_all(modavd_handle h)
-{
-    (void)h;
-    return MODAVD_E_UNSUPPORTED;
-}
-
-int modavd_key(modavd_handle h, int display, int android_keycode, int down)
-{
-    (void)h, (void)display, (void)android_keycode, (void)down;
-    return MODAVD_E_UNSUPPORTED;
-}
-
-int modavd_input_text(modavd_handle h, const char* utf8)
-{
-    (void)h, (void)utf8;
-    return MODAVD_E_UNSUPPORTED;
 }
