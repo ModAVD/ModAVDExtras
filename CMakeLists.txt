@@ -28,13 +28,21 @@ if(NOT WIN32)
   endif()
 endif()
 
-set(MX_SOURCES src/core.c src/shm.c src/console.c src/log.c)
+set(MX_SOURCES src/core.c src/shm.c src/console.c src/console_command.c src/input.c src/log.c)
+
+if(NOT WIN32)
+  # POSIX: the per-handle input lock.
+  find_package(Threads REQUIRED)
+endif()
 
 function(mx_link_system target)
   if(WIN32)
     target_link_libraries(${target} PRIVATE ws2_32)
-  elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    target_link_libraries(${target} PRIVATE rt)
+  else()
+    target_link_libraries(${target} PRIVATE Threads::Threads)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+      target_link_libraries(${target} PRIVATE rt)
+    endif()
   endif()
 endfunction()
 
@@ -56,6 +64,11 @@ add_executable(test_core tests/test_core.c)
 target_link_libraries(test_core PRIVATE mx_core)
 mx_link_system(test_core)
 add_test(NAME test_core COMMAND test_core)
+
+add_executable(test_input tests/test_input.c)
+target_link_libraries(test_input PRIVATE mx_core)
+mx_link_system(test_input)
+add_test(NAME test_input COMMAND test_input)
 
 if(NOT WIN32)
   add_executable(test_open_posix tests/test_open_posix.c)
