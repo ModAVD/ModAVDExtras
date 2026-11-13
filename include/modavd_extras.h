@@ -1,5 +1,5 @@
 /*
- * ModAVDExtras: screen capture (and, later, input) for ModAVD instances,
+ * ModAVDExtras: screen capture and touch input for ModAVD instances,
  * for automation frameworks that want to skip adb.
  *
  * Copyright 2026 qiyinxi
@@ -37,8 +37,10 @@ extern "C" {
 #define MODAVD_API __attribute__((visibility("default")))
 #endif
 
-/* Bumped whenever a function or field is added. Nothing is ever removed. */
-#define MODAVD_API_VERSION 1
+/* Bumped whenever a function or field is added, or a declared one starts to work.
+ * Nothing is ever removed.
+ * 1: capture. 2: touch (modavd_touch_*). */
+#define MODAVD_API_VERSION 2
 
 typedef struct modavd_instance* modavd_handle;
 
@@ -57,7 +59,7 @@ enum {
 /* modavd_capabilities() */
 enum {
     MODAVD_CAP_SCREENCAP = 1u << 0,
-    MODAVD_CAP_TOUCH = 1u << 1, /* not yet */
+    MODAVD_CAP_TOUCH = 1u << 1, /* API version 2 */
     MODAVD_CAP_KEY = 1u << 2,   /* not yet */
     MODAVD_CAP_TEXT = 1u << 3,  /* not yet */
 };
@@ -154,14 +156,30 @@ MODAVD_API int modavd_console_port(modavd_handle h);      /* > 0, or MODAVD_E_IN
 MODAVD_API int modavd_capture(modavd_handle h, int display, uint32_t format, uint32_t flags, void* buf,
                               size_t buf_size, modavd_frame_info* info);
 
-/* ---- input: declared for the next version, MODAVD_E_UNSUPPORTED for now ---- */
+/* ---- touch (API version 2, MODAVD_CAP_TOUCH) ---- */
 
-/* Coordinates are display pixels; contact is 0-based (at most 10 at once). */
+/* Touches on the emulator's own touch screen, sent through its console: Android
+ * sees them as a finger on the screen, not as injected events. Needs nothing in
+ * the guest. The console session opens on the first call and reopens once if it
+ * broke (the emulator restarted).
+ *
+ * Coordinates are display pixels of the shared frame (clamped to it); contact is
+ * 0-based, at most 10 at once; pressure 0 = the default (what a mouse click on
+ * the emulator window uses). Only display 0.
+ * - touch_down on a contact that is already down moves it.
+ * - touch_move on a contact that is not down: MODAVD_E_INVALID.
+ * - touch_up on a contact that is not down sends nothing and returns MODAVD_OK.
+ * MODAVD_E_NOT_READY: no frame was published yet, so the display size is unknown.
+ * MODAVD_E_NOT_FOUND: the console does not answer. MODAVD_E_IO: auth failed or
+ * the console refused the command. */
 MODAVD_API int modavd_touch_down(modavd_handle h, int display, int contact, int x, int y, int pressure);
 MODAVD_API int modavd_touch_move(modavd_handle h, int display, int contact, int x, int y, int pressure);
 MODAVD_API int modavd_touch_up(modavd_handle h, int display, int contact);
-/* Lifts every contact this handle pressed. modavd_close() will do the same. */
+/* Lifts every contact this handle pressed. modavd_close() does the same. */
 MODAVD_API int modavd_touch_release_all(modavd_handle h);
+
+/* ---- keys and text: declared, MODAVD_E_UNSUPPORTED for now ---- */
+
 /* Android key code (KEYCODE_*); down = 1 press, 0 release. */
 MODAVD_API int modavd_key(modavd_handle h, int display, int android_keycode, int down);
 MODAVD_API int modavd_input_text(modavd_handle h, const char* utf8);

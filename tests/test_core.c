@@ -157,7 +157,7 @@ static void test_capture_from_fake_frame(void)
         return;
     }
     CHECK_EQ(modavd_console_port(h), port);
-    CHECK_EQ(modavd_capabilities(h), MODAVD_CAP_SCREENCAP);
+    CHECK_EQ(modavd_capabilities(h), MODAVD_CAP_SCREENCAP | MODAVD_CAP_TOUCH);
 
     check_capture(h, MODAVD_FMT_BGRA, 4, 0, w, hgt);
     check_capture(h, MODAVD_FMT_BGR, 3, 0, w, hgt);
@@ -193,9 +193,10 @@ static void test_capture_from_fake_frame(void)
     fake_frame_set_size(&f, w, hgt);
     CHECK_EQ(modavd_capture(h, 0, MODAVD_FMT_BGR, 0, NULL, 0, &info), MODAVD_OK);
 
-    /* input is not in this version */
-    CHECK_EQ(modavd_touch_down(h, 0, 0, 1, 1, 1), MODAVD_E_UNSUPPORTED);
-    CHECK_EQ(modavd_touch_release_all(h), MODAVD_E_UNSUPPORTED);
+    /* touch goes through the console, and nothing answers on this port (test_input covers a fake one) */
+    CHECK_EQ(modavd_touch_down(h, 0, 0, 1, 1, 1), MODAVD_E_NOT_FOUND);
+    CHECK_EQ(modavd_touch_release_all(h), MODAVD_OK);
+    /* keys and text are not in this version */
     CHECK_EQ(modavd_key(h, 0, 4, 1), MODAVD_E_UNSUPPORTED);
     CHECK_EQ(modavd_input_text(h, "a"), MODAVD_E_UNSUPPORTED);
 
