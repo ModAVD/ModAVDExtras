@@ -23,12 +23,16 @@ typedef int socklen_t;
 static void sleep_ms(int ms) { Sleep((DWORD)ms); }
 #else
 #include <arpa/inet.h>
+#include <limits.h>
 #include <netinet/in.h>
 #include <pthread.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
 typedef int sock_t;
 #define BAD_SOCK (-1)
 #define close_sock close
@@ -219,12 +223,13 @@ static int use_auth_token(void)
     }
 #else
     mkdir(kHome, 0700);
-    char full[1024];
+    /* realpath() needs PATH_MAX bytes (4096 on Linux); fortified glibc aborts on less. */
+    char full[PATH_MAX];
     if (!realpath(kHome, full) || setenv("HOME", full, 1) != 0) {
         return -1;
     }
 #endif
-    char path[1100];
+    char path[sizeof(full) + 64];
     snprintf(path, sizeof(path), "%s/.emulator_console_auth_token", full);
     FILE* f = fopen(path, "wb");
     if (!f) {
