@@ -73,11 +73,47 @@ void mx_shm_close(mx_shm* shm);
  * MODAVD_E_IO: auth failed, the command answered KO, or a timeout. */
 int mx_console_command(int port, const char* command, int timeout_ms);
 
+/* A console session kept open across commands. sock is the platform socket,
+ * -1 (INVALID_SOCKET) when closed. */
+typedef struct mx_console {
+    intptr_t sock;
+} mx_console;
+
+/* Connects and authenticates. MODAVD_OK, MODAVD_E_NOT_FOUND (could not
+ * connect) or MODAVD_E_IO (auth failed). timeout_ms bounds each reply. */
+int mx_console_open(int port, int timeout_ms, mx_console* c);
+/* MODAVD_OK, MODAVD_E_IO (the console answered KO) or MODAVD_E_NOT_FOUND
+ * (the session broke; it is closed and may be opened again). */
+int mx_console_send(mx_console* c, const char* command);
+/* Says quit and closes; nothing happens when already closed. */
+void mx_console_close(mx_console* c);
+
+/* ---- input.c ---- */
+#define MX_MAX_CONTACTS 10
+#define MX_ABS_MAX 32767        /* the virtio touch screen's axis range (INPUT_EVENT_ABS_MAX) */
+#define MX_TOUCH_PRESSURE 0x400 /* what "event mouse" presses with (MTS_PRESSURE_RANGE_MAX) */
+#define MX_TOUCH_SIZE 0x500     /* ABS_MT_TOUCH_MAJOR / MINOR of "event mouse" */
+
+enum { MX_TOUCH_DOWN = 0, MX_TOUCH_MOVE = 1, MX_TOUCH_UP = 2 };
+
+/* A display pixel coordinate (0 .. size-1, clamped) on the touch screen's
+ * 0 .. MX_ABS_MAX axis, scaled as the emulator scales "event mouse". */
+int mx_touch_axis(int v, int size);
+/* Writes the console command for one touch action on contact (slot) with
+ * axis coordinates ax, ay. Returns the length, or -1 if it does not fit. */
+int mx_touch_command(char* buf, size_t cap, int action, int contact, int ax, int ay, int pressure);
+
+struct mx_input; /* lock, console session and pressed contacts of one handle */
+struct mx_input* mx_input_create(int console_port);
+/* Lifts the contacts still down, closes the session and frees. */
+void mx_input_destroy(struct mx_input* in);
+
 /* ---- core.c ---- */
 struct modavd_instance {
     int console_port;
     int simd; /* mx_cpu_simd() at open */
     mx_shm shm;
+    struct mx_input* input;
 };
 
 /* 1 when this CPU runs the vector row conversion (SSSE3 on x86, NEON on

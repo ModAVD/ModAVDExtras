@@ -1,6 +1,7 @@
 /*
  * A minimal client for the emulator console (telnet-style text on 127.0.0.1).
- * Version 0 only uses it to start frame sharing; input will use it too.
+ * Used to start frame sharing (one-off connections) and to send touch input
+ * (a session kept open per handle).
  *
  * Copyright 2026 qiyinxi
  * SPDX-License-Identifier: LGPL-3.0-or-later
@@ -97,8 +98,9 @@ static int send_line(mx_socket s, const char* line)
     return send(s, cmd, n, MX_SEND_FLAGS) == n ? 0 : -1;
 }
 
-int mx_console_command(int port, const char* command, int timeout_ms)
+int mx_console_open(int port, int timeout_ms, mx_console* c)
 {
+    c->sock = (intptr_t)MX_BAD_SOCKET;
     char token[256];
     read_auth_token(token, sizeof(token));
 
@@ -108,55 +110,88 @@ int mx_console_command(int port, const char* command, int timeout_ms)
         return MODAVD_E_IO;
     }
 #endif
-    int rc = MODAVD_E_NOT_FOUND;
     mx_socket s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (s != MX_BAD_SOCKET) {
+    if (s == MX_BAD_SOCKET) {
 #ifdef _WIN32
-        DWORD tv = (DWORD)timeout_ms;
-#else
-        struct timeval tv = { timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
+        WSACleanup();
 #endif
-        setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
-#if defined(SO_NOSIGPIPE)
-        int one = 1;
-        setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
-#endif
-        struct sockaddr_in addr;
-        memset(&addr, 0, sizeof(addr));
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons((unsigned short)port);
-        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        char buf[4096];
-        if (connect(s, (struct sockaddr*)&addr, sizeof(addr)) == 0 && read_until_ok(s, buf, sizeof(buf)) == 1) {
-            int authed = 1;
-            if (token[0]) {
-                char auth[300];
-                snprintf(auth, sizeof(auth), "auth %s", token);
-                authed = send_line(s, auth) == 0 && read_until_ok(s, buf, sizeof(buf)) == 1;
-            }
-            if (!authed) {
-                mx_log(MODAVD_LOG_WARN, "console %d auth failed", port);
-                rc = MODAVD_E_IO;
-            }
-            else {
-                int ok = send_line(s, command) == 0 && read_until_ok(s, buf, sizeof(buf)) == 1;
-                mx_log(MODAVD_LOG_INFO, "console %d %s -> %s", port, command, ok ? "OK" : "fail");
-                rc = ok ? MODAVD_OK : MODAVD_E_IO;
-            }
-            send_line(s, "quit");
-        }
-        else {
-#ifdef _WIN32
-            int err = WSAGetLastError();
-#else
-            int err = 0;
-#endif
-            mx_log(MODAVD_LOG_WARN, "console %d connect failed (%d)", port, err);
-        }
-        mx_close_socket(s);
+        return MODAVD_E_IO;
     }
+#ifdef _WIN32
+    DWORD tv = (DWORD)timeout_ms;
+#else
+    struct timeval tv = { timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
+#endif
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+#if defined(SO_NOSIGPIPE)
+    int one = 1;
+    setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
+#endif
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((unsigned short)port);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    char buf[4096];
+    int rc = MODAVD_OK;
+    if (connect(s, (struct sockaddr*)&addr, sizeof(addr)) != 0 || read_until_ok(s, buf, sizeof(buf)) != 1) {
+#ifdef _WIN32
+        int err = WSAGetLastError();
+#else
+        int err = 0;
+#endif
+        mx_log(MODAVD_LOG_WARN, "console %d connect failed (%d)", port, err);
+        rc = MODAVD_E_NOT_FOUND;
+    }
+    else if (token[0]) {
+        char auth[300];
+        snprintf(auth, sizeof(auth), "auth %s", token);
+        if (send_line(s, auth) != 0 || read_until_ok(s, buf, sizeof(buf)) != 1) {
+            mx_log(MODAVD_LOG_WARN, "console %d auth failed", port);
+            rc = MODAVD_E_IO;
+        }
+    }
+    if (rc != MODAVD_OK) {
+        mx_close_socket(s);
+#ifdef _WIN32
+        WSACleanup();
+#endif
+        return rc;
+    }
+    c->sock = (intptr_t)s;
+    return MODAVD_OK;
+}
+
+int mx_console_send(mx_console* c, const char* command)
+{
+    if (c->sock == (intptr_t)MX_BAD_SOCKET) {
+        return MODAVD_E_NOT_FOUND;
+    }
+    mx_socket s = (mx_socket)c->sock;
+    char buf[4096];
+    if (send_line(s, command) != 0) {
+        mx_console_close(c);
+        return MODAVD_E_NOT_FOUND;
+    }
+    int r = read_until_ok(s, buf, sizeof(buf));
+    if (r < 0) {
+        /* The emulator went away or stopped answering: the session is unusable. */
+        mx_console_close(c);
+        return MODAVD_E_NOT_FOUND;
+    }
+    return r == 1 ? MODAVD_OK : MODAVD_E_IO;
+}
+
+void mx_console_close(mx_console* c)
+{
+    if (c->sock == (intptr_t)MX_BAD_SOCKET) {
+        return;
+    }
+    mx_socket s = (mx_socket)c->sock;
+    send_line(s, "quit");
+    mx_close_socket(s);
+    c->sock = (intptr_t)MX_BAD_SOCKET;
 #ifdef _WIN32
     WSACleanup();
 #endif
-    return rc;
 }
