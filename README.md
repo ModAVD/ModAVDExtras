@@ -10,7 +10,7 @@
 
 ## 这是什么
 
-一个 C 库：从 [ModAVD](https://github.com/ModAVD/ModAVD) 实例直接取画面，不经 adb。给 MAA（MaaCore）、MaaFramework 这类自动化框架接入用。以后还会加宿主侧的点击和按键。
+一个 C 库：从 [ModAVD](https://github.com/ModAVD/ModAVD) 实例直接取画面、在宿主这边点击，不经 adb。给 MAA（MaaCore）、MaaFramework 这类自动化框架接入用。
 
 - 画面来自模拟器自己的共享内存：`screenrecord webrtc start`（或启动参数 `-share-vid`）之后，模拟器把每一帧写进一块按控制台端口命名的共享内存。
   - Windows 上叫 `SHM_videmulator<端口>`，Linux、macOS 上叫 `videmulator<端口>`；
@@ -21,12 +21,13 @@
   - 拷出一帧，换成调用方要的格式；
   - 遇到新帧写到一半时重拷；
   - 告诉调用方现在能不能用。
+- 点击走模拟器控制台的 `event send`，发标准的多点触控事件（槽位、跟踪编号、坐标、压力），到达模拟器自己的虚拟触屏：安卓看到的是屏幕上的手指，和在模拟器窗口里点一样，不是应用注入的事件，客体里也不用装东西。最多 10 根手指。
 - 库**不自己退回 adb**：出错时返回错误码，让调用方按自己的规则换别的办法。
 - 只依赖系统库：Windows 上是 `KERNEL32`、`WS2_32`，C 运行库静态链接；POSIX 上是 `shm_open`、`mmap` 和套接字。
 
 ## 状态
 
-- v0.1：只有截图。点击、按键、文字的函数已经声明，现在返回 `MODAVD_E_UNSUPPORTED`。
+- 截图（接口版本 1）和点击（接口版本 2，`MODAVD_CAP_TOUCH`）。按键、文字的函数已经声明，现在返回 `MODAVD_E_UNSUPPORTED`：控制台发的按键会进触屏设备、被丢掉，`event text` 会悄悄丢掉键盘映射里没有的字。
 - Windows：截图这套逻辑在 ModAVD 上已经用了一个多月，形式是下面的兼容外壳。
 - macOS（Apple Silicon）：11-09 有贡献者用官方 Emulator 37.2.13、API 35 ARM64 实测过截图。
 - Linux：能编，单元测试在 CI 上跑；还没有在模拟器上实测。
@@ -106,11 +107,12 @@ ctest --test-dir build --output-on-failure
 
 ## English
 
-ModAVDExtras is a small C library that reads the screen of a [ModAVD](https://github.com/ModAVD/ModAVD) instance directly, without adb, for automation frameworks such as MaaCore (MAA) and MaaFramework. Host-side touch and key input will follow.
+ModAVDExtras is a small C library that reads the screen of a [ModAVD](https://github.com/ModAVD/ModAVD) instance directly, without adb, for automation frameworks such as MaaCore (MAA) and MaaFramework, and touches it from the host.
 
 - Frames come from the emulator's own shared memory: after `screenrecord webrtc start` (or `-share-vid`), the emulator writes every frame to a region named after its console port: `SHM_videmulator<port>` on Windows, `videmulator<port>` elsewhere. The layout is a 24-byte header (width, height, fps, frame number, timestamp) followed by BGRA pixels.
 - The library finds the console port from an adb address, starts frame sharing through the console when it is off, copies a frame in the format the caller asks for (copying again if a new frame arrived meanwhile), and reports whether capture is usable. It never falls back to adb by itself.
-- Version 0.1 does screen capture only; the input functions are declared and return `MODAVD_E_UNSUPPORTED`. See [include/modavd_extras.h](include/modavd_extras.h).
+- Touch (API version 2, `MODAVD_CAP_TOUCH`) goes through the console's `event send` as standard multi-touch events (slot, tracking id, position, pressure) to the emulator's own virtual touch screen: Android sees a finger on the screen, as with a click on the emulator window, not an injected event, and nothing is installed in the guest. Up to 10 contacts.
+- Keys and text are declared and return `MODAVD_E_UNSUPPORTED`: keys sent through the console reach the touch screen device and are dropped, and `event text` silently drops characters missing from the keyboard map. See [include/modavd_extras.h](include/modavd_extras.h).
 - `external_renderer_ipc.dll` is a Windows-only compatibility shell. It exports the four capture functions that MaaCore looks up in MuMu's DLL, on top of the same code, so MaaCore versions that do not know ModAVD can still capture from it. AUTO-MAS uses it today. It will be retired once MaaCore can connect to ModAVD directly.
 - Status: Windows has used this capture code for over a month through the shell below; on Apple Silicon macOS a contributor tested capture with the official Emulator 37.2.13 and API 35 ARM64; Linux builds and passes the unit tests in CI but has not been tested with an emulator. From v0.1.2 the [releases](https://github.com/ModAVD/ModAVDExtras/releases) carry `modavd_extras.dll` (Windows x64), `libmodavd_extras.dylib` (macOS arm64) and `libmodavd_extras.so` (Linux x64), plus the Windows-only shell.
 - Build: `build.ps1` on Windows (Visual Studio 2022 Build Tools, CMake, Ninja); CMake on Linux and macOS. The unit tests need no emulator.
