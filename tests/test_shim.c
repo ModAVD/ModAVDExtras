@@ -53,7 +53,8 @@ int main(int argc, char** argv)
     const int port = 65003;
     const uint32_t w = 48, h = 20;
     fake_frame f;
-    if (fake_frame_create(&f, port, w, h, w, h) != 0) {
+    SOCKET console = fake_listen(port); /* the shell only maps a frame an emulator is behind */
+    if (fake_frame_create(&f, port, w, h, w, h) != 0 || console == INVALID_SOCKET) {
         fprintf(stderr, "cannot create the fake frame\n");
         return 1;
     }
@@ -122,7 +123,8 @@ int main(int argc, char** argv)
     {
         const int base = 1100, index = 3000;
         fake_frame g;
-        if (fake_frame_create(&g, base + 10 * index, w, h, w, h) != 0) {
+        SOCKET gl = fake_listen(base + 10 * index);
+        if (fake_frame_create(&g, base + 10 * index, w, h, w, h) != 0 || gl == INVALID_SOCKET) {
             fprintf(stderr, "cannot create the second fake frame\n");
             return 1;
         }
@@ -160,8 +162,10 @@ int main(int argc, char** argv)
         /* A portBase ModAVD does not accept is not taken: the plan falls back to 20000 (port 50000, no frame).
          * Frames wait where taking 1150 or 1000 would land, so taking them shows. */
         fake_frame g1150, g1000;
+        SOCKET l1150 = fake_listen(1150 + 10 * index), l1000 = fake_listen(1000 + 10 * index);
         if (fake_frame_create(&g1150, 1150 + 10 * index, w, h, w, h) != 0 ||
-            fake_frame_create(&g1000, 1000 + 10 * index, w, h, w, h) != 0) {
+            fake_frame_create(&g1000, 1000 + 10 * index, w, h, w, h) != 0 || l1150 == INVALID_SOCKET ||
+            l1000 == INVALID_SOCKET) {
             fprintf(stderr, "cannot create the fake frames for refused plans\n");
             return 1;
         }
@@ -185,6 +189,9 @@ int main(int argc, char** argv)
         fake_frame_destroy(&g1150);
         fake_frame_destroy(&g1000);
         fake_frame_destroy(&g);
+        fake_unlisten(l1150);
+        fake_unlisten(l1000);
+        fake_unlisten(gl);
         remove(json);
         RemoveDirectoryA(dir);
         RemoveDirectoryA(parent);
@@ -201,7 +208,18 @@ int main(int argc, char** argv)
         CHECK(strstr(text, "connect index=65021 port=65021: shared memory unavailable") != NULL);
     }
 
+    /* A frame left over with no emulator behind it: not mapped, so it can go. */
+    {
+        fake_frame s;
+        if (fake_frame_create(&s, 65022, w, h, w, h) == 0) {
+            CHECK(nemu_connect(scratch, 65022) == 0);
+            fake_frame_destroy(&s);
+            CHECK(OpenFileMappingA(FILE_MAP_READ, FALSE, "SHM_videmulator65022") == NULL);
+        }
+    }
+
     fake_frame_destroy(&f);
+    fake_unlisten(console);
     FreeLibrary(dll);
     if (g_failures) {
         fprintf(stderr, "%d check(s) failed\n", g_failures);

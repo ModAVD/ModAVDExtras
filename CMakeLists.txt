@@ -37,7 +37,7 @@ endif()
 
 function(mx_link_system target)
   if(WIN32)
-    target_link_libraries(${target} PRIVATE ws2_32)
+    target_link_libraries(${target} PRIVATE ws2_32 iphlpapi)
   else()
     target_link_libraries(${target} PRIVATE Threads::Threads)
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")

@@ -269,8 +269,8 @@ EXPORT int nemu_capture_display(int handle, unsigned int display_id, int buffer_
      * the last copy over when a new frame arrived during every copy, instead
      * of failing (MaaCore would give up on this path at connect, or drop to its
      * screencap speed test again). */
-    int rc = mx_copy_frame(&h->shm, MODAVD_FMT_RGBA, MODAVD_CAPTURE_BOTTOM_UP | MX_CAPTURE_UNPUBLISHED, h->simd,
-                           size ? pixels : NULL, size, &info);
+    int rc = mx_capture_frame(h, MODAVD_FMT_RGBA, MODAVD_CAPTURE_BOTTOM_UP | MX_CAPTURE_UNPUBLISHED,
+                              size ? pixels : NULL, size, &info);
     if (rc == MX_TORN) {
         rc = MODAVD_OK;
     }

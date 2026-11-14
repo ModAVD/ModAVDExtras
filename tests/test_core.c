@@ -468,8 +468,144 @@ static void test_log_callback(void)
     modavd_set_log(NULL, NULL);
 }
 
-int main(void)
+#ifdef _WIN32
+/* Another process standing in for the emulator: this test listening on the
+ * console port until it is killed (or 60 s pass). */
+static HANDLE spawn_listener(int port, DWORD* pid)
 {
+    char exe[MAX_PATH], cmd[MAX_PATH + 32];
+    GetModuleFileNameA(NULL, exe, MAX_PATH);
+    snprintf(cmd, sizeof(cmd), "\"%s\" --listen %d", exe, port);
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
+    memset(&si, 0, sizeof(si));
+    si.cb = sizeof(si);
+    if (!CreateProcessA(NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+        return NULL;
+    }
+    CloseHandle(pi.hThread);
+    *pid = pi.dwProcessId;
+    for (int i = 0; i < 100 && mx_console_owner_pid(port) != pi.dwProcessId; ++i) {
+        Sleep(50);
+    }
+    return pi.hProcess;
+}
+
+static int capture_until(modavd_handle h, int want, uint32_t* width)
+{
+    modavd_frame_info info;
+    int rc = MODAVD_E_IO;
+    for (int i = 0; i < 60; ++i) {
+        memset(&info, 0, sizeof(info));
+        info.size = sizeof(info);
+        rc = modavd_capture(h, 0, MODAVD_FMT_BGRA, 0, NULL, 0, &info);
+        if (rc == want) {
+            break;
+        }
+        Sleep(50);
+    }
+    if (width) {
+        *width = (uint32_t)info.width;
+    }
+    return rc;
+}
+
+/* ModAVD#210: the emulator exits while a client keeps its handle; the next
+ * emulator on the port shares frames at a bigger size. The handle must not
+ * keep the old region alive, and must pick up the new one. */
+static void test_release_when_emulator_exits(void)
+{
+    const int port = 65015;
+    fake_frame f;
+    DWORD pid = 0;
+    if (fake_frame_create(&f, port, 16, 8, 16, 8) != 0) {
+        CHECK(!"cannot create the fake frame");
+        return;
+    }
+    HANDLE emu = spawn_listener(port, &pid);
+    CHECK(emu != NULL);
+    CHECK_EQ(mx_console_owner_pid(port), pid);
+    modavd_open_params p;
+    memset(&p, 0, sizeof(p));
+    p.size = sizeof(p);
+    p.console_port = port;
+    p.flags = MODAVD_OPEN_NO_START;
+    modavd_handle h = NULL;
+    CHECK_EQ(modavd_open(&p, &h), MODAVD_OK);
+    uint32_t width = 0;
+    CHECK_EQ(capture_until(h, MODAVD_OK, &width), MODAVD_OK);
+    CHECK_EQ(width, 16);
+
+    /* The emulator exits: the handle lets go of its region. */
+    TerminateProcess(emu, 1);
+    WaitForSingleObject(emu, 5000);
+    CloseHandle(emu);
+    CHECK_EQ(capture_until(h, MODAVD_E_NOT_FOUND, NULL), MODAVD_E_NOT_FOUND);
+    fake_frame_destroy(&f);
+    HANDLE left = OpenFileMappingA(FILE_MAP_READ, FALSE, "SHM_videmulator65015");
+    CHECK(left == NULL);
+    if (left) {
+        CloseHandle(left);
+    }
+
+    /* The next emulator on the port, at a bigger size. */
+    if (fake_frame_create(&f, port, 32, 16, 32, 16) != 0) {
+        CHECK(!"cannot create the second fake frame");
+        modavd_close(h);
+        return;
+    }
+    CHECK_EQ(f.size, MX_HEADER_SIZE + 32 * 16 * 4);
+    emu = spawn_listener(port, &pid);
+    CHECK(emu != NULL);
+    CHECK_EQ(capture_until(h, MODAVD_OK, &width), MODAVD_OK);
+    CHECK_EQ(width, 32);
+    modavd_close(h);
+    if (emu) {
+        TerminateProcess(emu, 1);
+        WaitForSingleObject(emu, 5000);
+        CloseHandle(emu);
+    }
+    fake_frame_destroy(&f);
+}
+
+/* A region with no emulator on the port (left over, held by someone else):
+ * an ordinary open does not map it. */
+static void test_open_leftover_region(void)
+{
+    fake_frame f;
+    if (fake_frame_create(&f, 65016, 8, 4, 8, 4) != 0) {
+        CHECK(!"cannot create the fake frame");
+        return;
+    }
+    modavd_open_params p;
+    memset(&p, 0, sizeof(p));
+    p.size = sizeof(p);
+    p.console_port = 65016;
+    modavd_handle h = NULL;
+    CHECK_EQ(modavd_open(&p, &h), MODAVD_E_NOT_FOUND);
+    CHECK(h == NULL);
+    fake_frame_destroy(&f);
+    HANDLE left = OpenFileMappingA(FILE_MAP_READ, FALSE, "SHM_videmulator65016");
+    CHECK(left == NULL);
+    if (left) {
+        CloseHandle(left);
+    }
+}
+#endif
+
+int main(int argc, char** argv)
+{
+#ifdef _WIN32
+    if (argc == 3 && strcmp(argv[1], "--listen") == 0) {
+        SOCKET s = fake_listen(atoi(argv[2]));
+        Sleep(60000);
+        fake_unlisten(s);
+        return 0;
+    }
+#else
+    (void)argc;
+    (void)argv;
+#endif
     test_parse_console_port();
     test_version_and_errors();
     test_open_errors();
@@ -479,6 +615,10 @@ int main(void)
     test_capture_odd_sizes();
     test_convert_row();
     test_log_callback();
+#ifdef _WIN32
+    test_release_when_emulator_exits();
+    test_open_leftover_region();
+#endif
     if (g_failures) {
         fprintf(stderr, "%d check(s) failed\n", g_failures);
         return 1;
