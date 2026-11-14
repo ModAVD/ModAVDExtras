@@ -162,7 +162,13 @@ void modavd_close(modavd_handle h)
     free(h);
 }
 
-uint32_t modavd_capabilities(modavd_handle h) { return h ? MODAVD_CAP_SCREENCAP | MODAVD_CAP_TOUCH : 0; }
+uint32_t modavd_capabilities(modavd_handle h)
+{
+    if (!h) {
+        return 0;
+    }
+    return MODAVD_CAP_SCREENCAP | MODAVD_CAP_TOUCH | MODAVD_CAP_TEXT | mx_input_capabilities(h->input);
+}
 
 int modavd_console_port(modavd_handle h) { return h ? h->console_port : MODAVD_E_INVALID; }
 

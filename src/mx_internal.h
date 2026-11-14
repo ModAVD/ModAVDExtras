@@ -85,8 +85,14 @@ int mx_console_open(int port, int timeout_ms, mx_console* c);
 /* MODAVD_OK, MODAVD_E_IO (the console answered KO) or MODAVD_E_NOT_FOUND
  * (the session broke; it is closed and may be opened again). */
 int mx_console_send(mx_console* c, const char* command);
+/* mx_console_send() that also copies what the console answered (the lines up
+ * to and including OK / KO, truncated to cap) into reply. */
+int mx_console_query(mx_console* c, const char* command, char* reply, size_t cap);
 /* Says quit and closes; nothing happens when already closed. */
 void mx_console_close(mx_console* c);
+
+/* The longest command line a session sends, without the line end. */
+#define MX_CONSOLE_LINE_MAX 768
 
 /* ---- input.c ---- */
 #define MX_MAX_CONTACTS 10
@@ -103,7 +109,31 @@ int mx_touch_axis(int v, int size);
  * axis coordinates ax, ay. Returns the length, or -1 if it does not fit. */
 int mx_touch_command(char* buf, size_t cap, int action, int contact, int ax, int ay, int pressure);
 
+/* ---- input.c: keys and text ---- */
+#define MX_KEYBOARD_CHUNK 4  /* characters per "event text": a longer burst overruns the guest keyboard's queue */
+#define MX_KEYBOARD_GAP_MS 4 /* pause after each of them, for the guest to read the keys */
+#define MX_COMMIT_CHUNK 480  /* bytes of text per "ime commit" */
+
+/* The Linux input code (KEY_*) of an Android key code (KEYCODE_*), 0 if the
+ * emulator's keyboard has no such key. */
+int mx_key_linux_code(int android_keycode);
+/* The character an Android key code types unshifted ('a', '1', '\n', ...), 0 if none. */
+int mx_key_char(int android_keycode);
+/* 1 when the keyboard can type all of text: printable ASCII, '\n' and '\t'. */
+int mx_text_is_keyboard(const char* utf8);
+/* Writes "event text ..." for the next characters of *text (at most
+ * MX_KEYBOARD_CHUNK) and advances *text. Returns the length, 0 at the end of
+ * the text, -1 if it does not fit. */
+int mx_text_keyboard_command(char* buf, size_t cap, const char** text);
+/* Writes "ime commit ..." for the next bytes of *text, up to a line end or
+ * MX_COMMIT_CHUNK bytes (whole UTF-8 sequences), and advances *text; a line
+ * end is taken with it and *newline set to 1. Returns the length (0 when only
+ * a line end was taken, or at the end of the text), -1 if it does not fit. */
+int mx_text_commit_command(char* buf, size_t cap, const char** text, int* newline);
+
 struct mx_input; /* lock, console session and pressed contacts of one handle */
+/* MODAVD_CAP_KEY when the console has "event key", else 0. Asks the console once per session. */
+uint32_t mx_input_capabilities(struct mx_input* in);
 struct mx_input* mx_input_create(int console_port);
 /* Lifts the contacts still down, closes the session and frees. */
 void mx_input_destroy(struct mx_input* in);

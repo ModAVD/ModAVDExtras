@@ -90,7 +90,7 @@ static int read_until_ok(mx_socket s, char* buf, int cap)
 
 static int send_line(mx_socket s, const char* line)
 {
-    char cmd[512];
+    char cmd[MX_CONSOLE_LINE_MAX + 3];
     int n = snprintf(cmd, sizeof(cmd), "%s\r\n", line);
     if (n <= 0 || (size_t)n >= sizeof(cmd)) {
         return -1;
@@ -162,8 +162,11 @@ int mx_console_open(int port, int timeout_ms, mx_console* c)
     return MODAVD_OK;
 }
 
-int mx_console_send(mx_console* c, const char* command)
+int mx_console_query(mx_console* c, const char* command, char* reply, size_t cap)
 {
+    if (cap) {
+        reply[0] = '\0';
+    }
     if (c->sock == (intptr_t)MX_BAD_SOCKET) {
         return MODAVD_E_NOT_FOUND;
     }
@@ -179,8 +182,13 @@ int mx_console_send(mx_console* c, const char* command)
         mx_console_close(c);
         return MODAVD_E_NOT_FOUND;
     }
+    if (cap) {
+        snprintf(reply, cap, "%s", buf);
+    }
     return r == 1 ? MODAVD_OK : MODAVD_E_IO;
 }
+
+int mx_console_send(mx_console* c, const char* command) { return mx_console_query(c, command, NULL, 0); }
 
 void mx_console_close(mx_console* c)
 {
