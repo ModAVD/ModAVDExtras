@@ -184,9 +184,12 @@ MODAVD_API int modavd_touch_release_all(modavd_handle h);
  * given as an Android key code (KEYCODE_*): Android sees a hardware key, not an
  * injected event. Only display 0.
  *
- * With MODAVD_CAP_KEY (ModAVD emulators newer than 0.40) every key of a
- * keyboard works, and BACK, HOME, APP_SWITCH, MENU, POWER and the volume keys.
- * Without it, only these do, and the press sends both press and release:
+ * With MODAVD_CAP_KEY (ModAVD emulators newer than 0.40) every key of that
+ * keyboard works: letters, digits, punctuation, ENTER, TAB, SPACE, DEL, the
+ * arrows, SHIFT / CTRL / ALT, and BACK, HOME, APP_SWITCH, MENU, SEARCH, POWER,
+ * the volume and media keys. ESCAPE is its Esc key, which Android reads as BACK.
+ * Without it, and for keys the keyboard lacks, only these work, and the press
+ * sends both press and release:
  * - keys that type a character (letters, digits, ENTER, TAB, SPACE, punctuation);
  * - the editing keys (DEL, FORWARD_DEL, the arrows, MOVE_HOME, MOVE_END) while
  *   a text field has the focus and ModAVD's host input method is the current one.

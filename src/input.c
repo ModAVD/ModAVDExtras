@@ -267,24 +267,33 @@ int modavd_touch_release_all(modavd_handle h)
  *   current one and a text field to have the focus ("ime status").
  */
 
-/* Android key codes that type a character unshifted, and the Linux code of every key we know. */
+/* The emulator's keyboard, as the guest reads it (/vendor/usr/keylayout/qwerty.kl of the
+ * goldfish images): the Android key code, the Linux code of its key, and the character
+ * it types unshifted. Generic.kl does not apply to it: HOME is key 102 here. */
 static const struct {
     short android;
     short linux_code;
     char ch;
 } kKeys[] = {
-    { 3, 172, 0 },    /* HOME -> KEY_HOMEPAGE */
+    { 1, 60, 0 },     /* SOFT_LEFT */
+    { 2, 230, 0 },    /* SOFT_RIGHT */
+    { 3, 102, 0 },    /* HOME */
     { 4, 158, 0 },    /* BACK */
+    { 5, 231, 0 },    /* CALL */
+    { 6, 107, 0 },    /* ENDCALL */
     { 7, 11, '0' },   { 8, 2, '1' },    { 9, 3, '2' },    { 10, 4, '3' },   { 11, 5, '4' },
     { 12, 6, '5' },   { 13, 7, '6' },   { 14, 8, '7' },   { 15, 9, '8' },   { 16, 10, '9' },
+    { 17, 227, 0 },   /* STAR */
+    { 18, 228, 0 },   /* POUND */
     { 19, 103, 0 },   /* DPAD_UP */
     { 20, 108, 0 },   /* DPAD_DOWN */
     { 21, 105, 0 },   /* DPAD_LEFT */
     { 22, 106, 0 },   /* DPAD_RIGHT */
-    { 23, 353, 0 },   /* DPAD_CENTER -> KEY_SELECT */
+    { 23, 232, 0 },   /* DPAD_CENTER */
     { 24, 115, 0 },   /* VOLUME_UP */
     { 25, 114, 0 },   /* VOLUME_DOWN */
     { 26, 116, 0 },   /* POWER */
+    { 27, 212, 0 },   /* CAMERA */
     { 29, 30, 'a' },  { 30, 48, 'b' },  { 31, 46, 'c' },  { 32, 32, 'd' },  { 33, 18, 'e' },
     { 34, 33, 'f' },  { 35, 34, 'g' },  { 36, 35, 'h' },  { 37, 23, 'i' },  { 38, 36, 'j' },
     { 39, 37, 'k' },  { 40, 38, 'l' },  { 41, 50, 'm' },  { 42, 49, 'n' },  { 43, 24, 'o' },
@@ -296,24 +305,27 @@ static const struct {
     { 58, 100, 0 },   /* ALT_RIGHT */
     { 59, 42, 0 },    /* SHIFT_LEFT */
     { 60, 54, 0 },    /* SHIFT_RIGHT */
-    { 61, 15, '\t' }, { 62, 57, ' ' },  { 66, 28, '\n' },
+    { 61, 15, '\t' }, { 62, 57, ' ' },
+    { 64, 150, 0 },   /* EXPLORER */
+    { 65, 155, 0 },   /* ENVELOPE */
+    { 66, 28, '\n' },
     { 67, 14, 0 },    /* DEL (backspace) */
-    { 68, 41, '`' },  { 69, 12, '-' },  { 70, 13, '=' },  { 71, 26, '[' },  { 72, 27, ']' },
+    { 68, 399, '`' }, { 69, 12, '-' },  { 70, 13, '=' },  { 71, 26, '[' },  { 72, 27, ']' },
     { 73, 43, '\\' }, { 74, 39, ';' },  { 75, 40, '\'' }, { 76, 53, '/' },
+    { 77, 215, 0 },   /* AT */
     { 82, 139, 0 },   /* MENU */
-    { 92, 104, 0 },   /* PAGE_UP */
-    { 93, 109, 0 },   /* PAGE_DOWN */
-    { 111, 1, 0 },    /* ESCAPE */
-    { 112, 111, 0 },  /* FORWARD_DEL */
+    { 84, 217, 0 },   /* SEARCH */
+    { 85, 164, 0 },   /* MEDIA_PLAY_PAUSE */
+    { 86, 166, 0 },   /* MEDIA_STOP */
+    { 87, 163, 0 },   /* MEDIA_NEXT */
+    { 88, 165, 0 },   /* MEDIA_PREVIOUS */
+    { 89, 168, 0 },   /* MEDIA_REWIND */
+    { 111, 1, 0 },    /* ESCAPE: the keyboard's Esc key, which this layout reads as BACK */
     { 113, 29, 0 },   /* CTRL_LEFT */
     { 114, 97, 0 },   /* CTRL_RIGHT */
-    { 122, 102, 0 },  /* MOVE_HOME */
-    { 123, 107, 0 },  /* MOVE_END */
-    { 131, 59, 0 },   { 132, 60, 0 },   { 133, 61, 0 },   { 134, 62, 0 },   { 135, 63, 0 }, /* F1 - F5 */
-    { 136, 64, 0 },   { 137, 65, 0 },   { 138, 66, 0 },   { 139, 67, 0 },   { 140, 68, 0 }, /* F6 - F10 */
-    { 141, 87, 0 },   { 142, 88, 0 },   /* F11, F12 */
-    { 164, 113, 0 },  /* VOLUME_MUTE */
-    { 187, 580, 0 },  /* APP_SWITCH -> KEY_APPSELECT */
+    { 115, 58, 0 },   /* CAPS_LOCK */
+    { 187, 580, 0 },  /* APP_SWITCH */
+    { 223, 142, 0 },  /* SLEEP */
 };
 
 int mx_key_linux_code(int android_keycode)
@@ -484,20 +496,14 @@ int modavd_key(modavd_handle h, int display, int android_keycode, int down)
     if (has < 0) {
         rc = has;
     }
-    else if (has) {
-        int code = mx_key_linux_code(android_keycode);
-        if (!code) {
-            rc = MODAVD_E_UNSUPPORTED;
-        }
-        else {
-            snprintf(cmd, sizeof(cmd), "event key %d %d", code, down ? 1 : 0);
-            rc = send_locked(in, cmd);
-        }
+    else if (has && mx_key_linux_code(android_keycode)) {
+        snprintf(cmd, sizeof(cmd), "event key %d %d", mx_key_linux_code(android_keycode), down ? 1 : 0);
+        rc = send_locked(in, cmd);
     }
     else {
-        /* An emulator without "event key": the press types the key's character
-         * or goes to the focused text field as a whole; the release has
-         * nothing left to do. */
+        /* No "event key", or a key the keyboard lacks: the press types the
+         * key's character or goes to the focused text field as a whole; the
+         * release has nothing left to do. */
         int ch = mx_key_char(android_keycode);
         if (ch) {
             const char one[2] = { (char)ch, '\0' };

@@ -370,10 +370,12 @@ static void test_touch_session(void)
 static void test_key_and_text_commands(void)
 {
     CHECK_EQ(mx_key_linux_code(4), 158);   /* BACK */
-    CHECK_EQ(mx_key_linux_code(3), 172);   /* HOME */
+    CHECK_EQ(mx_key_linux_code(3), 102);   /* HOME: the goldfish keyboard layout, not Generic.kl */
     CHECK_EQ(mx_key_linux_code(66), 28);   /* ENTER */
     CHECK_EQ(mx_key_linux_code(29), 30);   /* A */
     CHECK_EQ(mx_key_linux_code(187), 580); /* APP_SWITCH */
+    CHECK_EQ(mx_key_linux_code(111), 1);   /* ESCAPE: the Esc key */
+    CHECK_EQ(mx_key_linux_code(112), 0);   /* FORWARD_DEL: not on that keyboard */
     CHECK_EQ(mx_key_linux_code(9999), 0);
     CHECK_EQ(mx_key_char(29), 'a');
     CHECK_EQ(mx_key_char(7), '0');
