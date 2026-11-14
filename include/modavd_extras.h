@@ -39,8 +39,8 @@ extern "C" {
 
 /* Bumped whenever a function or field is added, or a declared one starts to work.
  * Nothing is ever removed.
- * 1: capture. 2: touch (modavd_touch_*). */
-#define MODAVD_API_VERSION 2
+ * 1: capture. 2: touch (modavd_touch_*). 3: keys and text (modavd_key, modavd_input_text). */
+#define MODAVD_API_VERSION 3
 
 typedef struct modavd_instance* modavd_handle;
 
@@ -60,8 +60,8 @@ enum {
 enum {
     MODAVD_CAP_SCREENCAP = 1u << 0,
     MODAVD_CAP_TOUCH = 1u << 1, /* API version 2 */
-    MODAVD_CAP_KEY = 1u << 2,   /* not yet */
-    MODAVD_CAP_TEXT = 1u << 3,  /* not yet */
+    MODAVD_CAP_KEY = 1u << 2,   /* API version 3: this emulator takes every key of modavd_key() */
+    MODAVD_CAP_TEXT = 1u << 3,  /* API version 3 */
 };
 
 /* Pixel formats for modavd_capture(). Rows are packed: stride = width * bytes per pixel. */
@@ -178,10 +178,31 @@ MODAVD_API int modavd_touch_up(modavd_handle h, int display, int contact);
 /* Lifts every contact this handle pressed. modavd_close() does the same. */
 MODAVD_API int modavd_touch_release_all(modavd_handle h);
 
-/* ---- keys and text: declared, MODAVD_E_UNSUPPORTED for now ---- */
+/* ---- keys and text (API version 3) ---- */
 
-/* Android key code (KEYCODE_*); down = 1 press, 0 release. */
+/* Presses (down = 1) or releases (down = 0) a key of the emulator's keyboard,
+ * given as an Android key code (KEYCODE_*): Android sees a hardware key, not an
+ * injected event. Only display 0.
+ *
+ * With MODAVD_CAP_KEY (ModAVD emulators newer than 0.40) every key of that
+ * keyboard works: letters, digits, punctuation, ENTER, TAB, SPACE, DEL, the
+ * arrows, SHIFT / CTRL / ALT, and BACK, HOME, APP_SWITCH, MENU, SEARCH, POWER,
+ * the volume and media keys. ESCAPE is its Esc key, which Android reads as BACK.
+ * Without it, and for keys the keyboard lacks, only these work, and the press
+ * sends both press and release:
+ * - keys that type a character (letters, digits, ENTER, TAB, SPACE, punctuation);
+ * - the editing keys (DEL, FORWARD_DEL, the arrows, MOVE_HOME, MOVE_END) while
+ *   a text field has the focus and ModAVD's host input method is the current one.
+ * MODAVD_E_UNSUPPORTED: this emulator cannot send that key now; use another way. */
 MODAVD_API int modavd_key(modavd_handle h, int display, int android_keycode, int down);
+
+/* Types UTF-8 text into what has the focus. '\n' is ENTER; other control
+ * characters except '\t' are MODAVD_E_INVALID.
+ * - While a text field has the focus and ModAVD's host input method
+ *   (org.modavd.ime, installed by ModAVD) is the current one, the text goes
+ *   to the field as it is, in any language.
+ * - Otherwise printable ASCII is typed on the emulator's keyboard (a US layout).
+ * MODAVD_E_UNSUPPORTED: text beyond ASCII and no such text field; nothing was typed. */
 MODAVD_API int modavd_input_text(modavd_handle h, const char* utf8);
 
 #ifdef __cplusplus
