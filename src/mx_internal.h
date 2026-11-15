@@ -144,7 +144,32 @@ struct modavd_instance {
     int simd; /* mx_cpu_simd() at open */
     mx_shm shm;
     struct mx_input* input;
+#ifdef _WIN32
+    /* The emulator owns the name of the shared frame, but a mapping stays
+     * alive while anyone holds it. If this handle kept the old mapping after
+     * the emulator exited, the next emulator on the same port would get the
+     * old, possibly smaller region back and could not share frames (ModAVD#210).
+     * So the handle watches the emulator process (the one listening on the
+     * console port) and drops the mapping when it exits; the next capture maps
+     * the new emulator's region. shm_lock (an SRWLOCK) guards shm: shared
+     * while copying, exclusive while mapping or unmapping. */
+    void* shm_lock;
+    void* emu_process; /* HANDLE of the watched emulator, NULL when none */
+    void* emu_wait;    /* its RegisterWaitForSingleObject wait, NULL when none */
+    uint64_t reattach_ms; /* GetTickCount64() of the last attempt to map again */
+#endif
 };
+
+/* Copies one frame of the handle, as mx_copy_frame() does on its mapping.
+ * Windows: when the emulator exited the mapping is gone; this maps the region
+ * of the emulator now on the port (at most once a second) and otherwise
+ * returns MODAVD_E_NOT_FOUND. */
+int mx_capture_frame(struct modavd_instance* h, uint32_t format, uint32_t flags, void* buf, size_t buf_size,
+                     modavd_frame_info* info);
+
+/* Windows: process id of the program listening on 127.0.0.1:port (or any
+ * address) over TCP, 0 when none. */
+unsigned long mx_console_owner_pid(int port);
 
 /* 1 when this CPU runs the vector row conversion (SSSE3 on x86, NEON on
  * ARM64), else 0. */

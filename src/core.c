@@ -38,6 +38,81 @@ static void sleep_ms(int ms)
 #define MODAVD_EXTRAS_VERSION "0.0.0"
 #endif
 
+#ifdef _WIN32
+/* Thread pool callback: the watched emulator exited. Drops the mapping so the
+ * next emulator on this port can create its region at its own size. */
+static void CALLBACK emulator_exited(PVOID ctx, BOOLEAN timed_out)
+{
+    (void)timed_out;
+    struct modavd_instance* h = (struct modavd_instance*)ctx;
+    AcquireSRWLockExclusive((PSRWLOCK)&h->shm_lock);
+    if (h->shm.view) {
+        mx_log(MODAVD_LOG_INFO, "port=%d: the emulator exited, released its shared memory", h->console_port);
+        mx_shm_close(&h->shm);
+    }
+    ReleaseSRWLockExclusive((PSRWLOCK)&h->shm_lock);
+}
+
+static int watch_emulator(struct modavd_instance* h, unsigned long pid)
+{
+    HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)pid);
+    if (!process) {
+        return MODAVD_E_IO;
+    }
+    HANDLE wait = NULL;
+    if (!RegisterWaitForSingleObject(&wait, process, emulator_exited, h, INFINITE, WT_EXECUTEONLYONCE)) {
+        CloseHandle(process);
+        return MODAVD_E_IO;
+    }
+    h->emu_process = process;
+    h->emu_wait = wait;
+    return MODAVD_OK;
+}
+
+/* block: wait for a running callback to return. Only without shm_lock held,
+ * since the callback takes it. */
+static void unwatch_emulator(struct modavd_instance* h, int block)
+{
+    if (h->emu_wait) {
+        UnregisterWaitEx((HANDLE)h->emu_wait, block ? INVALID_HANDLE_VALUE : NULL);
+        h->emu_wait = NULL;
+    }
+    if (h->emu_process) {
+        CloseHandle((HANDLE)h->emu_process);
+        h->emu_process = NULL;
+    }
+}
+
+/* With shm_lock held exclusively and no mapping: maps the region of the
+ * emulator now on the port, at most once a second. */
+static void reattach(struct modavd_instance* h)
+{
+    ULONGLONG now = GetTickCount64();
+    if (h->reattach_ms && now - h->reattach_ms < 1000) {
+        return;
+    }
+    h->reattach_ms = now;
+    /* The old wait has fired (that is what dropped the mapping) and its
+     * callback is done with the lock, so this does not need to block. */
+    unwatch_emulator(h, 0);
+    unsigned long pid = mx_console_owner_pid(h->console_port);
+    if (!pid) {
+        return;
+    }
+    mx_shm shm = { 0 };
+    if (mx_shm_open(h->console_port, &shm) != MODAVD_OK) {
+        return;
+    }
+    if (watch_emulator(h, pid) != MODAVD_OK) {
+        mx_log(MODAVD_LOG_WARN, "port=%d: cannot watch emulator process %lu", h->console_port, pid);
+    }
+    h->shm = shm;
+    const volatile mx_video_info* vi = (const volatile mx_video_info*)shm.view;
+    mx_log(MODAVD_LOG_INFO, "port=%d: mapped the shared memory of the new emulator, %ux%u size=%zu", h->console_port,
+           vi->width, vi->height, shm.size);
+}
+#endif
+
 uint32_t modavd_api_version(void) { return MODAVD_API_VERSION; }
 
 const char* modavd_version_string(void) { return MODAVD_EXTRAS_VERSION; }
@@ -132,6 +207,20 @@ int modavd_open(const modavd_open_params* params, modavd_handle* out)
         return rc;
     }
 
+#ifdef _WIN32
+    /* The emulator whose region this is: the program on the console port. */
+    unsigned long pid = mx_console_owner_pid(port);
+    if (!pid && !(params->flags & MODAVD_OPEN_NO_START)) {
+        /* A region with no emulator behind it is left over from an emulator
+         * that exited while another program still held it. Holding it too
+         * would keep it alive for the next emulator on this port. */
+        mx_log(MODAVD_LOG_WARN, "port=%d: shared memory is there but no emulator listens on the console port",
+               port);
+        mx_shm_close(&shm);
+        return MODAVD_E_NOT_FOUND;
+    }
+#endif
+
     struct modavd_instance* inst = (struct modavd_instance*)calloc(1, sizeof(*inst));
     struct mx_input* input = mx_input_create(port);
     if (!inst || !input) {
@@ -147,6 +236,14 @@ int modavd_open(const modavd_open_params* params, modavd_handle* out)
     const volatile mx_video_info* vi = (const volatile mx_video_info*)shm.view;
     mx_log(MODAVD_LOG_INFO, "open port=%d %ux%u fps=%u frame=%u size=%zu client=%s", port, vi->width, vi->height,
            vi->fps, vi->frame_number, shm.size, params->client_name ? params->client_name : "-");
+#ifdef _WIN32
+    InitializeSRWLock((PSRWLOCK)&inst->shm_lock);
+    /* NO_START with no console trusts the mapping as it is, unwatched. */
+    if (pid && watch_emulator(inst, pid) != MODAVD_OK) {
+        mx_log(MODAVD_LOG_WARN, "port=%d: cannot watch emulator process %lu; its shared memory stays mapped", port,
+               pid);
+    }
+#endif
     *out = inst;
     return MODAVD_OK;
 }
@@ -156,6 +253,10 @@ void modavd_close(modavd_handle h)
     if (!h) {
         return;
     }
+#ifdef _WIN32
+    /* Waits for a running emulator_exited() before the handle goes away. */
+    unwatch_emulator(h, 1);
+#endif
     /* Lifts the contacts this handle left down. */
     mx_input_destroy(h->input);
     mx_shm_close(&h->shm);
@@ -359,6 +460,33 @@ int mx_copy_frame(const mx_shm* shm, uint32_t format, uint32_t flags, int simd, 
     return MX_TORN;
 }
 
+int mx_capture_frame(struct modavd_instance* h, uint32_t format, uint32_t flags, void* buf, size_t buf_size,
+                     modavd_frame_info* info)
+{
+#ifdef _WIN32
+    PSRWLOCK lock = (PSRWLOCK)&h->shm_lock;
+    AcquireSRWLockShared(lock);
+    if (!h->shm.view) {
+        ReleaseSRWLockShared(lock);
+        AcquireSRWLockExclusive(lock);
+        if (!h->shm.view) {
+            reattach(h);
+        }
+        ReleaseSRWLockExclusive(lock);
+        AcquireSRWLockShared(lock);
+        if (!h->shm.view) {
+            ReleaseSRWLockShared(lock);
+            return MODAVD_E_NOT_FOUND;
+        }
+    }
+    int rc = mx_copy_frame(&h->shm, format, flags, h->simd, buf, buf_size, info);
+    ReleaseSRWLockShared(lock);
+    return rc;
+#else
+    return mx_copy_frame(&h->shm, format, flags, h->simd, buf, buf_size, info);
+#endif
+}
+
 int modavd_capture(modavd_handle h, int display, uint32_t format, uint32_t flags, void* buf, size_t buf_size,
                    modavd_frame_info* info)
 {
@@ -368,7 +496,7 @@ int modavd_capture(modavd_handle h, int display, uint32_t format, uint32_t flags
     if (display != 0) {
         return MODAVD_E_UNSUPPORTED;
     }
-    int rc = mx_copy_frame(&h->shm, format, flags & ~MX_CAPTURE_UNPUBLISHED, h->simd, buf, buf_size, info);
+    int rc = mx_capture_frame(h, format, flags & ~MX_CAPTURE_UNPUBLISHED, buf, buf_size, info);
     if (rc == MX_TORN) {
         mx_log(MODAVD_LOG_WARN, "port=%d: a new frame arrived during each of %d copies", h->console_port,
                MX_MAX_COPY_ATTEMPTS);

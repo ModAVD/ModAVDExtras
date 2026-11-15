@@ -136,7 +136,13 @@ MODAVD_API int modavd_parse_console_port(const char* adb_address);
  * opening the mapping: named regions can survive an emulator restart. Console
  * auth/command failures return MODAVD_E_IO, even if an old mapping exists.
  * The first frame may not have arrived yet; capture then returns NOT_READY.
- * MODAVD_E_NOT_FOUND: frame sharing is off and nothing answers on the console port.
+ * On Windows the handle holds the mapping only while the emulator listening on
+ * the console port runs: when it exits the mapping is released, so the next
+ * emulator on the port can share frames at its own size (ModAVD/ModAVD#210).
+ * MODAVD_E_NOT_FOUND: frame sharing is off and nothing answers on the console
+ *                     port; on Windows also a region with no emulator on the
+ *                     port (left over, held by another program; unless
+ *                     MODAVD_OPEN_NO_START is set).
  * MODAVD_E_NOT_READY: the console answered (or MODAVD_OPEN_NO_START is set) but
  *                     frame sharing did not come up in time. */
 MODAVD_API int modavd_open(const modavd_open_params* params, modavd_handle* out);
@@ -152,6 +158,9 @@ MODAVD_API int modavd_console_port(modavd_handle h);      /* > 0, or MODAVD_E_IN
  * MODAVD_E_NOT_READY: no frame yet, or the emulator published a new frame
  *                     during each of the copies, so buf may mix two frames;
  *                     call again. MODAVD_E_RESIZED: reopen the handle.
+ * MODAVD_E_NOT_FOUND (Windows): the emulator exited and no new one shares
+ *                     frames on the port yet; call again later, the handle
+ *                     maps the next emulator's region by itself.
  * MODAVD_E_BUFFER: buf_size < info->stride * info->height. */
 MODAVD_API int modavd_capture(modavd_handle h, int display, uint32_t format, uint32_t flags, void* buf,
                               size_t buf_size, modavd_frame_info* info);

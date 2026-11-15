@@ -16,6 +16,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
 #include <windows.h>
+#include <iphlpapi.h>
 typedef SOCKET mx_socket;
 #define MX_BAD_SOCKET INVALID_SOCKET
 #define mx_close_socket closesocket
@@ -189,6 +190,39 @@ int mx_console_query(mx_console* c, const char* command, char* reply, size_t cap
 }
 
 int mx_console_send(mx_console* c, const char* command) { return mx_console_query(c, command, NULL, 0); }
+
+#ifdef _WIN32
+unsigned long mx_console_owner_pid(int port)
+{
+    /* The listener table, filtered by Windows itself: no need to know what
+     * value this Windows build uses for the listening state. */
+    ULONG size = 0;
+    MIB_TCPTABLE_OWNER_PID* table = NULL;
+    DWORD rc = ERROR_INSUFFICIENT_BUFFER;
+    for (int attempt = 0; attempt < 4 && rc == ERROR_INSUFFICIENT_BUFFER; ++attempt) {
+        free(table);
+        table = size ? (MIB_TCPTABLE_OWNER_PID*)malloc(size) : NULL;
+        if (size && !table) {
+            return 0;
+        }
+        rc = GetExtendedTcpTable(table, &size, FALSE, AF_INET, TCP_TABLE_OWNER_PID_LISTENER, 0);
+    }
+    unsigned long pid = 0;
+    if (rc == NO_ERROR && table) {
+        for (DWORD i = 0; i < table->dwNumEntries; ++i) {
+            const MIB_TCPROW_OWNER_PID* row = &table->table[i];
+            DWORD addr = ntohl(row->dwLocalAddr);
+            if (ntohs((u_short)row->dwLocalPort) == (u_short)port &&
+                (addr == INADDR_LOOPBACK || addr == INADDR_ANY)) {
+                pid = row->dwOwningPid;
+                break;
+            }
+        }
+    }
+    free(table);
+    return pid;
+}
+#endif
 
 void mx_console_close(mx_console* c)
 {

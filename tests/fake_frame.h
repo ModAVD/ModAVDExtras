@@ -15,6 +15,7 @@
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
 #include <windows.h>
 #else
 #include <fcntl.h>
@@ -109,5 +110,39 @@ static void fake_frame_destroy(fake_frame* f)
 #endif
     memset(f, 0, sizeof(*f));
 }
+
+#ifdef _WIN32
+/* Listens on 127.0.0.1:port without ever answering, so the library sees an
+ * emulator (this process) on that console port. INVALID_SOCKET on failure. */
+static SOCKET fake_listen(int port)
+{
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+        return INVALID_SOCKET;
+    }
+    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_port = htons((u_short)port);
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (s == INVALID_SOCKET || bind(s, (struct sockaddr*)&a, sizeof(a)) != 0 || listen(s, 4) != 0) {
+        if (s != INVALID_SOCKET) {
+            closesocket(s);
+        }
+        WSACleanup();
+        return INVALID_SOCKET;
+    }
+    return s;
+}
+
+static void fake_unlisten(SOCKET s)
+{
+    if (s != INVALID_SOCKET) {
+        closesocket(s);
+        WSACleanup();
+    }
+}
+#endif
 
 #endif /* FAKE_FRAME_H */
