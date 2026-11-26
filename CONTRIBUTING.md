@@ -1,5 +1,7 @@
 # 参与 ModAVDExtras
 
+**简体中文** | [English](CONTRIBUTING.en.md)
+
 ModAVD 组织的通用规矩见 [ModAVD 的 CONTRIBUTING.md](https://github.com/ModAVD/ModAVD/blob/main/CONTRIBUTING.md) 和文档站的[参与开发](https://modavd.github.io/develop/)：先开 issue 商量，从自己的 fork 开 PR，署名用 GitHub 的 noreply 邮箱，不写 `Co-authored-by`，用 AI 工具要让它自己测过并在 PR 里写明。
 
 下面是这个仓库自己的几条。

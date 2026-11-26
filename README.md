@@ -120,3 +120,4 @@ ModAVDExtras is a small C library that reads the screen of a [ModAVD](https://gi
 - Status: Windows has used this capture code for over a month through the shell below; on Apple Silicon macOS a contributor tested capture with the official Emulator 37.2.13 and API 35 ARM64; Linux builds and passes the unit tests in CI but has not been tested with an emulator. From v0.1.2 the [releases](https://github.com/ModAVD/ModAVDExtras/releases) carry `modavd_extras.dll` (Windows x64), `libmodavd_extras.dylib` (macOS arm64) and `libmodavd_extras.so` (Linux x64), plus the Windows-only shell.
 - Build: `build.ps1` on Windows (Visual Studio 2022 Build Tools, CMake, Ninja); CMake on Linux and macOS. The unit tests need no emulator.
 - License: LGPL-3.0-or-later ([LICENSE](LICENSE), [COPYING](COPYING)). Only code written for this project goes in; code from GPL or AGPL projects such as MaaCore does not.
+- Contributing: see [CONTRIBUTING.en.md](CONTRIBUTING.en.md).
