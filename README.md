@@ -1,12 +1,15 @@
 # ModAVDExtras：给自动化框架用的 ModAVD 截图库
 
+**简体中文** | [English](README.en.md)
+
+<!-- README.md 和 README.en.md 逐节对应：改了其中一份，请在同一个 PR 里把另一份也改了。 -->
+
 - [这是什么](#这是什么)
 - [状态](#状态)
 - [接口](#接口)
 - [兼容外壳 external_renderer_ipc.dll](#兼容外壳-external_renderer_ipcdll)
 - [编译和测试](#编译和测试)
 - [许可证](#许可证)
-- [English](#english)
 
 ## 这是什么
 
@@ -107,17 +110,3 @@ ctest --test-dir build --output-on-failure
 - 载入这个库的程序不受 LGPL 约束；改了库本身，改过的库要按 LGPL 开源。
 - 本库只收我们自己写的代码。来自 GPL、AGPL 项目（比如 MaaCore）的代码不进这个仓库，见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 - `scripts/` 下的仓库检查脚本和许可证另算，见 [NOTICE](NOTICE)。
-
-## English
-
-ModAVDExtras is a small C library that reads the screen of a [ModAVD](https://github.com/ModAVD/ModAVD) instance directly, without adb, for automation frameworks such as MaaCore (MAA) and MaaFramework, and touches it from the host.
-
-- Frames come from the emulator's own shared memory: after `screenrecord webrtc start` (or `-share-vid`), the emulator writes every frame to a region named after its console port: `SHM_videmulator<port>` on Windows, `videmulator<port>` elsewhere. The layout is a 24-byte header (width, height, fps, frame number, timestamp) followed by BGRA pixels.
-- The library finds the console port from an adb address, starts frame sharing through the console when it is off, copies a frame in the format the caller asks for (copying again if a new frame arrived meanwhile), and reports whether capture is usable. It never falls back to adb by itself.
-- Touch (API version 2, `MODAVD_CAP_TOUCH`) goes through the console's `event send` as standard multi-touch events (slot, tracking id, position, pressure) to the emulator's own virtual touch screen: Android sees a finger on the screen, as with a click on the emulator window, not an injected event, and nothing is installed in the guest. Up to 10 contacts.
-- Keys and text (API version 3) go through the console too. `modavd_key` presses keys of the emulator's keyboard by Android key code, BACK, HOME and APP_SWITCH included; it needs the console's `event key` (ModAVD emulators newer than 0.40, `MODAVD_CAP_KEY`), and on older emulators only keys that type a character and the editing keys of a focused text field work. `modavd_input_text` hands UTF-8 text in any language to the focused text field through ModAVD's host input method, or types ASCII on the keyboard when there is none. See [include/modavd_extras.h](include/modavd_extras.h).
-- `external_renderer_ipc.dll` is a Windows-only compatibility shell. It exports the four capture functions that MaaCore looks up in MuMu's DLL, on top of the same code, so MaaCore versions that do not know ModAVD can still capture from it. AUTO-MAS uses it today. It will be retired once MaaCore can connect to ModAVD directly.
-- Status: Windows has used this capture code for over a month through the shell below; on Apple Silicon macOS a contributor tested capture with the official Emulator 37.2.13 and API 35 ARM64; Linux builds and passes the unit tests in CI but has not been tested with an emulator. From v0.1.2 the [releases](https://github.com/ModAVD/ModAVDExtras/releases) carry `modavd_extras.dll` (Windows x64), `libmodavd_extras.dylib` (macOS arm64) and `libmodavd_extras.so` (Linux x64), plus the Windows-only shell.
-- Build: `build.ps1` on Windows (Visual Studio 2022 Build Tools, CMake, Ninja); CMake on Linux and macOS. The unit tests need no emulator.
-- License: LGPL-3.0-or-later ([LICENSE](LICENSE), [COPYING](COPYING)). Only code written for this project goes in; code from GPL or AGPL projects such as MaaCore does not.
-- Contributing: see [CONTRIBUTING.en.md](CONTRIBUTING.en.md).
