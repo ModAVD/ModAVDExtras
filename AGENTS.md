@@ -19,7 +19,7 @@
 - `include/modavd_extras.h` 是对外的承诺：函数和字段只加不删，加了就把 `MODAVD_API_VERSION` 加一；结构体开头的 `size` 字段不能动。
 - 库不自己退回 adb，出错返回错误码。
 - 兼容外壳的导出必须和现在一样：只有四个截图函数，不导出输入函数；`tests/test_shim.c` 会查这一条。
-- 用户看得见的改动带 `changelog.d/<名字>.<feat|fix|change|remove>.md`；只动开发、测试、CI、文档的不加。
+- 用户看得见的改动带 `changelog.d/<名字>.<feat|fix|change|remove>.md`，两行：先中文、再英文；只动开发、测试、CI、文档的不加。
 - `README.md` 和 `README.en.md`、`CONTRIBUTING.md` 和 `CONTRIBUTING.en.md`、`AGENTS.md` 和 `AGENTS.en.md` 是同一份文档的中文和英文，改一份就在同一个 PR 里改另一份。
 
 ## 测试
