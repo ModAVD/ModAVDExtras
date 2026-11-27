@@ -1,0 +1,2 @@
+3e55150f1cc0c702e0b9b41dd9f248e99363aaa7c07d881660143f0cd36b4c45  external_renderer_ipc.dll
+84719e698c4679185eea9b194dfd33bbecadd05fb4d9bfaf9bba0398aa65f8e3  modavd_extras.dll

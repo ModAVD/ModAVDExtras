@@ -1,5 +1,5 @@
 /*
- * ModAVDExtras: screen capture (and, later, input) for ModAVD instances,
+ * ModAVDExtras: screen capture and touch input for ModAVD instances,
  * for automation frameworks that want to skip adb.
  *
  * Copyright 2026 qiyinxi
@@ -37,8 +37,10 @@ extern "C" {
 #define MODAVD_API __attribute__((visibility("default")))
 #endif
 
-/* Bumped whenever a function or field is added. Nothing is ever removed. */
-#define MODAVD_API_VERSION 1
+/* Bumped whenever a function or field is added, or a declared one starts to work.
+ * Nothing is ever removed.
+ * 1: capture. 2: touch (modavd_touch_*). 3: keys and text (modavd_key, modavd_input_text). */
+#define MODAVD_API_VERSION 3
 
 typedef struct modavd_instance* modavd_handle;
 
@@ -46,7 +48,8 @@ enum {
     MODAVD_OK = 0,
     MODAVD_E_INVALID = -1,     /* bad argument */
     MODAVD_E_NOT_FOUND = -2,   /* nothing answers on that console port */
-    MODAVD_E_NOT_READY = -3,   /* frame sharing is off, or no frame was composed yet */
+    MODAVD_E_NOT_READY = -3,   /* frame sharing is off, no frame was composed yet, or (capture) new frames
+                                  kept arriving during the copy: try again */
     MODAVD_E_RESIZED = -4,     /* the shared frame no longer fits the mapping: close and reopen */
     MODAVD_E_BUFFER = -5,      /* buffer too small; the frame info says how big it must be */
     MODAVD_E_IO = -6,          /* an OS call failed */
@@ -56,9 +59,9 @@ enum {
 /* modavd_capabilities() */
 enum {
     MODAVD_CAP_SCREENCAP = 1u << 0,
-    MODAVD_CAP_TOUCH = 1u << 1, /* not yet */
-    MODAVD_CAP_KEY = 1u << 2,   /* not yet */
-    MODAVD_CAP_TEXT = 1u << 3,  /* not yet */
+    MODAVD_CAP_TOUCH = 1u << 1, /* API version 2 */
+    MODAVD_CAP_KEY = 1u << 2,   /* API version 3: this emulator takes every key of modavd_key() */
+    MODAVD_CAP_TEXT = 1u << 3,  /* API version 3 */
 };
 
 /* Pixel formats for modavd_capture(). Rows are packed: stride = width * bytes per pixel. */
@@ -70,7 +73,8 @@ enum {
 
 /* modavd_open_params.flags */
 enum {
-    /* Do not ask the emulator console to start frame sharing when it is off. */
+    /* Only open the shared mapping, without contacting the console. The caller
+     * must ensure it belongs to the current emulator and sharing is active. */
     MODAVD_OPEN_NO_START = 1u << 0,
 };
 
@@ -128,7 +132,17 @@ MODAVD_API void modavd_set_log(modavd_log_fn fn, void* user);
 MODAVD_API int modavd_parse_console_port(const char* adb_address);
 
 /* Connects to an instance. On success *out is a handle for modavd_close().
- * MODAVD_E_NOT_FOUND: frame sharing is off and nothing answers on the console port.
+ * On POSIX, unless NO_START is set, confirms sharing through the console before
+ * opening the mapping: named regions can survive an emulator restart. Console
+ * auth/command failures return MODAVD_E_IO, even if an old mapping exists.
+ * The first frame may not have arrived yet; capture then returns NOT_READY.
+ * On Windows the handle holds the mapping only while the emulator listening on
+ * the console port runs: when it exits the mapping is released, so the next
+ * emulator on the port can share frames at its own size (ModAVD/ModAVD#210).
+ * MODAVD_E_NOT_FOUND: frame sharing is off and nothing answers on the console
+ *                     port; on Windows also a region with no emulator on the
+ *                     port (left over, held by another program; unless
+ *                     MODAVD_OPEN_NO_START is set).
  * MODAVD_E_NOT_READY: the console answered (or MODAVD_OPEN_NO_START is set) but
  *                     frame sharing did not come up in time. */
 MODAVD_API int modavd_open(const modavd_open_params* params, modavd_handle* out);
@@ -141,21 +155,63 @@ MODAVD_API int modavd_console_port(modavd_handle h);      /* > 0, or MODAVD_E_IN
 
 /* Copies the latest frame of `display` (only 0 for now) into buf.
  * With buf == NULL or buf_size == 0 it only fills info (a size probe).
- * MODAVD_E_NOT_READY: no frame yet. MODAVD_E_RESIZED: reopen the handle.
+ * MODAVD_E_NOT_READY: no frame yet, or the emulator published a new frame
+ *                     during each of the copies, so buf may mix two frames;
+ *                     call again. MODAVD_E_RESIZED: reopen the handle.
+ * MODAVD_E_NOT_FOUND (Windows): the emulator exited and no new one shares
+ *                     frames on the port yet; call again later, the handle
+ *                     maps the next emulator's region by itself.
  * MODAVD_E_BUFFER: buf_size < info->stride * info->height. */
 MODAVD_API int modavd_capture(modavd_handle h, int display, uint32_t format, uint32_t flags, void* buf,
                               size_t buf_size, modavd_frame_info* info);
 
-/* ---- input: declared for the next version, MODAVD_E_UNSUPPORTED for now ---- */
+/* ---- touch (API version 2, MODAVD_CAP_TOUCH) ---- */
 
-/* Coordinates are display pixels; contact is 0-based (at most 10 at once). */
+/* Touches on the emulator's own touch screen, sent through its console: Android
+ * sees them as a finger on the screen, not as injected events. Needs nothing in
+ * the guest. The console session opens on the first call and reopens once if it
+ * broke (the emulator restarted).
+ *
+ * Coordinates are display pixels of the shared frame (clamped to it); contact is
+ * 0-based, at most 10 at once; pressure 0 = the default (what a mouse click on
+ * the emulator window uses). Only display 0.
+ * - touch_down on a contact that is already down moves it.
+ * - touch_move on a contact that is not down: MODAVD_E_INVALID.
+ * - touch_up on a contact that is not down sends nothing and returns MODAVD_OK.
+ * MODAVD_E_NOT_READY: no frame was published yet, so the display size is unknown.
+ * MODAVD_E_NOT_FOUND: the console does not answer. MODAVD_E_IO: auth failed or
+ * the console refused the command. */
 MODAVD_API int modavd_touch_down(modavd_handle h, int display, int contact, int x, int y, int pressure);
 MODAVD_API int modavd_touch_move(modavd_handle h, int display, int contact, int x, int y, int pressure);
 MODAVD_API int modavd_touch_up(modavd_handle h, int display, int contact);
-/* Lifts every contact this handle pressed. modavd_close() will do the same. */
+/* Lifts every contact this handle pressed. modavd_close() does the same. */
 MODAVD_API int modavd_touch_release_all(modavd_handle h);
-/* Android key code (KEYCODE_*); down = 1 press, 0 release. */
+
+/* ---- keys and text (API version 3) ---- */
+
+/* Presses (down = 1) or releases (down = 0) a key of the emulator's keyboard,
+ * given as an Android key code (KEYCODE_*): Android sees a hardware key, not an
+ * injected event. Only display 0.
+ *
+ * With MODAVD_CAP_KEY (ModAVD emulators newer than 0.40) every key of that
+ * keyboard works: letters, digits, punctuation, ENTER, TAB, SPACE, DEL, the
+ * arrows, SHIFT / CTRL / ALT, and BACK, HOME, APP_SWITCH, MENU, SEARCH, POWER,
+ * the volume and media keys. ESCAPE is its Esc key, which Android reads as BACK.
+ * Without it, and for keys the keyboard lacks, only these work, and the press
+ * sends both press and release:
+ * - keys that type a character (letters, digits, ENTER, TAB, SPACE, punctuation);
+ * - the editing keys (DEL, FORWARD_DEL, the arrows, MOVE_HOME, MOVE_END) while
+ *   a text field has the focus and ModAVD's host input method is the current one.
+ * MODAVD_E_UNSUPPORTED: this emulator cannot send that key now; use another way. */
 MODAVD_API int modavd_key(modavd_handle h, int display, int android_keycode, int down);
+
+/* Types UTF-8 text into what has the focus. '\n' is ENTER; other control
+ * characters except '\t' are MODAVD_E_INVALID.
+ * - While a text field has the focus and ModAVD's host input method
+ *   (org.modavd.ime, installed by ModAVD) is the current one, the text goes
+ *   to the field as it is, in any language.
+ * - Otherwise printable ASCII is typed on the emulator's keyboard (a US layout).
+ * MODAVD_E_UNSUPPORTED: text beyond ASCII and no such text field; nothing was typed. */
 MODAVD_API int modavd_input_text(modavd_handle h, const char* utf8);
 
 #ifdef __cplusplus

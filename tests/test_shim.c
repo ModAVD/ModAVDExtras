@@ -53,7 +53,8 @@ int main(int argc, char** argv)
     const int port = 65003;
     const uint32_t w = 48, h = 20;
     fake_frame f;
-    if (fake_frame_create(&f, port, w, h, w, h) != 0) {
+    SOCKET console = fake_listen(port); /* the shell only maps a frame an emulator is behind */
+    if (fake_frame_create(&f, port, w, h, w, h) != 0 || console == INVALID_SOCKET) {
         fprintf(stderr, "cannot create the fake frame\n");
         return 1;
     }
@@ -96,12 +97,105 @@ int main(int argc, char** argv)
     CHECK(nemu_capture_display(handle, 0, (int)size, &cw, &ch, buf) == -2);
     fake_frame_set_size(&f, w, h);
 
+    /* Started but not published yet: the size and the frame as they are, like
+     * the DLL this replaces; MaaCore's connect asks for the size right away. */
+    mx_video_info* vi = (mx_video_info*)f.view;
+    uint64_t ts = vi->ts_us;
+    vi->ts_us = 0;
+    cw = ch = 0;
+    CHECK(nemu_capture_display(handle, 0, 0, &cw, &ch, NULL) == 0);
+    CHECK(cw == (int)w && ch == (int)h);
+    CHECK(nemu_capture_display(handle, 0, (int)size, &cw, &ch, buf) == 0);
+    vi->ts_us = ts;
+
     nemu_disconnect(handle);
     CHECK(nemu_capture_display(handle, 0, 0, &cw, &ch, NULL) == -1);
     free(buf);
 
     /* No frame on that port and nothing listens: connect fails with 0. */
     CHECK(nemu_connect(scratch, 65021) == 0);
+
+    /* An instance number (as a user types it into MAA): the console port is on
+     * the port plan of the root that the MuMu path sits in, <root>\mumu-shim.
+     * Plan 1100 and index 3000: port 31100, while the default plan would give
+     * 50000; neither is near a real instance's ports (20000.., 21000..), so a
+     * wrong plan only fails to connect and never reaches a running emulator. */
+    {
+        const int base = 1100, index = 3000;
+        fake_frame g;
+        SOCKET gl = fake_listen(base + 10 * index);
+        if (fake_frame_create(&g, base + 10 * index, w, h, w, h) != 0 || gl == INVALID_SOCKET) {
+            fprintf(stderr, "cannot create the second fake frame\n");
+            return 1;
+        }
+        char dir[MAX_PATH], json[MAX_PATH];
+        snprintf(dir, sizeof(dir), "%s\\root\\mumu-shim", argv[2]);
+        snprintf(json, sizeof(json), "%s\\root\\mas-avd.json", argv[2]);
+        char parent[MAX_PATH];
+        snprintf(parent, sizeof(parent), "%s\\root", argv[2]);
+        CreateDirectoryA(parent, NULL);
+        CreateDirectoryA(dir, NULL);
+        wchar_t wdir[MAX_PATH];
+        MultiByteToWideChar(CP_UTF8, 0, dir, -1, wdir, MAX_PATH);
+        static const char* plans[] = {
+            "{\"portBase\": 1100}",
+            "\xEF\xBB\xBF{\r\n  \"components\": {},\r\n  \"portBase\" :\r\n 1100,\r\n  \"instances\": {}\r\n}",
+        };
+        for (size_t k = 0; k < sizeof(plans) / sizeof(plans[0]); ++k) {
+            FILE* jf = fopen(json, "wb");
+            CHECK(jf != NULL);
+            if (jf) {
+                fputs(plans[k], jf);
+                fclose(jf);
+            }
+            int hi = nemu_connect(wdir, index);
+            CHECK(hi > 0);
+            CHECK(nemu_capture_display(hi, 0, 0, &cw, &ch, NULL) == 0 && cw == (int)w && ch == (int)h);
+            nemu_disconnect(hi);
+            /* a trailing separator on the MuMu path names the same root */
+            wchar_t slash[MAX_PATH];
+            swprintf(slash, MAX_PATH, L"%ls\\", wdir);
+            hi = nemu_connect(slash, index);
+            CHECK(hi > 0);
+            nemu_disconnect(hi);
+        }
+        /* A portBase ModAVD does not accept is not taken: the plan falls back to 20000 (port 50000, no frame).
+         * Frames wait where taking 1150 or 1000 would land, so taking them shows. */
+        fake_frame g1150, g1000;
+        SOCKET l1150 = fake_listen(1150 + 10 * index), l1000 = fake_listen(1000 + 10 * index);
+        if (fake_frame_create(&g1150, 1150 + 10 * index, w, h, w, h) != 0 ||
+            fake_frame_create(&g1000, 1000 + 10 * index, w, h, w, h) != 0 || l1150 == INVALID_SOCKET ||
+            l1000 == INVALID_SOCKET) {
+            fprintf(stderr, "cannot create the fake frames for refused plans\n");
+            return 1;
+        }
+        static const char* bad_plans[] = { "{\"portBase\": 1150}", "{\"portBase\": 1100000}", "{\"portBase\": 1100.5}",
+                                           "{\"portBase\": \"1100\"}", "{\"portBase\": 1000}", "{\"portBase\": 65500}",
+                                           "{\"portbase\": 1100}" };
+        for (size_t k = 0; k < sizeof(bad_plans) / sizeof(bad_plans[0]); ++k) {
+            FILE* jf = fopen(json, "wb");
+            CHECK(jf != NULL);
+            if (jf) {
+                fputs(bad_plans[k], jf);
+                fclose(jf);
+            }
+            int hi = nemu_connect(wdir, index);
+            if (hi > 0) {
+                fprintf(stderr, "portBase %s was taken\n", bad_plans[k]);
+                ++g_failures;
+                nemu_disconnect(hi);
+            }
+        }
+        fake_frame_destroy(&g1150);
+        fake_frame_destroy(&g1000);
+        fake_frame_destroy(&g);
+        fake_unlisten(l1150);
+        fake_unlisten(l1000);
+        fake_unlisten(gl);
+        remove(json);
+        RemoveDirectoryA(dir);
+        RemoveDirectoryA(parent);
+    }
 
     FILE* lf = fopen(log_path, "rb");
     CHECK(lf != NULL);
@@ -114,7 +208,18 @@ int main(int argc, char** argv)
         CHECK(strstr(text, "connect index=65021 port=65021: shared memory unavailable") != NULL);
     }
 
+    /* A frame left over with no emulator behind it: not mapped, so it can go. */
+    {
+        fake_frame s;
+        if (fake_frame_create(&s, 65022, w, h, w, h) == 0) {
+            CHECK(nemu_connect(scratch, 65022) == 0);
+            fake_frame_destroy(&s);
+            CHECK(OpenFileMappingA(FILE_MAP_READ, FALSE, "SHM_videmulator65022") == NULL);
+        }
+    }
+
     fake_frame_destroy(&f);
+    fake_unlisten(console);
     FreeLibrary(dll);
     if (g_failures) {
         fprintf(stderr, "%d check(s) failed\n", g_failures);

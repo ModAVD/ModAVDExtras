@@ -21,8 +21,96 @@ static void sleep_ms(int ms)
 }
 #endif
 
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
+#define MX_X86 1
+#include <tmmintrin.h>
+#if defined(_MSC_VER)
+#include <intrin.h>
+#else
+#include <cpuid.h>
+#endif
+#elif defined(__aarch64__) || defined(_M_ARM64)
+#define MX_NEON 1
+#include <arm_neon.h>
+#endif
+
 #ifndef MODAVD_EXTRAS_VERSION
 #define MODAVD_EXTRAS_VERSION "0.0.0"
+#endif
+
+#ifdef _WIN32
+/* Thread pool callback: the watched emulator exited. Drops the mapping so the
+ * next emulator on this port can create its region at its own size. */
+static void CALLBACK emulator_exited(PVOID ctx, BOOLEAN timed_out)
+{
+    (void)timed_out;
+    struct modavd_instance* h = (struct modavd_instance*)ctx;
+    AcquireSRWLockExclusive((PSRWLOCK)&h->shm_lock);
+    if (h->shm.view) {
+        mx_log(MODAVD_LOG_INFO, "port=%d: the emulator exited, released its shared memory", h->console_port);
+        mx_shm_close(&h->shm);
+    }
+    ReleaseSRWLockExclusive((PSRWLOCK)&h->shm_lock);
+}
+
+static int watch_emulator(struct modavd_instance* h, unsigned long pid)
+{
+    HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)pid);
+    if (!process) {
+        return MODAVD_E_IO;
+    }
+    HANDLE wait = NULL;
+    if (!RegisterWaitForSingleObject(&wait, process, emulator_exited, h, INFINITE, WT_EXECUTEONLYONCE)) {
+        CloseHandle(process);
+        return MODAVD_E_IO;
+    }
+    h->emu_process = process;
+    h->emu_wait = wait;
+    return MODAVD_OK;
+}
+
+/* block: wait for a running callback to return. Only without shm_lock held,
+ * since the callback takes it. */
+static void unwatch_emulator(struct modavd_instance* h, int block)
+{
+    if (h->emu_wait) {
+        UnregisterWaitEx((HANDLE)h->emu_wait, block ? INVALID_HANDLE_VALUE : NULL);
+        h->emu_wait = NULL;
+    }
+    if (h->emu_process) {
+        CloseHandle((HANDLE)h->emu_process);
+        h->emu_process = NULL;
+    }
+}
+
+/* With shm_lock held exclusively and no mapping: maps the region of the
+ * emulator now on the port, at most once a second. */
+static void reattach(struct modavd_instance* h)
+{
+    ULONGLONG now = GetTickCount64();
+    if (h->reattach_ms && now - h->reattach_ms < 1000) {
+        return;
+    }
+    h->reattach_ms = now;
+    /* The old wait has fired (that is what dropped the mapping) and its
+     * callback is done with the lock, so this does not need to block. */
+    unwatch_emulator(h, 0);
+    unsigned long pid = mx_console_owner_pid(h->console_port);
+    if (!pid) {
+        return;
+    }
+    mx_shm shm = { 0 };
+    if (mx_shm_open(h->console_port, &shm) != MODAVD_OK) {
+        return;
+    }
+    if (watch_emulator(h, pid) != MODAVD_OK) {
+        mx_log(MODAVD_LOG_WARN, "port=%d: cannot watch emulator process %lu", h->console_port, pid);
+    }
+    h->shm = shm;
+    const volatile mx_video_info* vi = (const volatile mx_video_info*)shm.view;
+    mx_log(MODAVD_LOG_INFO, "port=%d: mapped the shared memory of the new emulator, %ux%u size=%zu", h->console_port,
+           vi->width, vi->height, shm.size);
+}
 #endif
 
 uint32_t modavd_api_version(void) { return MODAVD_API_VERSION; }
@@ -89,13 +177,26 @@ int modavd_open(const modavd_open_params* params, modavd_handle* out)
     }
     int timeout_ms = params->timeout_ms > 0 ? params->timeout_ms : MX_DEFAULT_TIMEOUT_MS;
 
+#ifndef _WIN32
+    /* POSIX names can outlive their producer. Confirm sharing before opening
+     * the name, since the new emulator may replace the stale object on start.
+     * Repeated starts reuse the active stream. NO_START trusts the mapping. */
+    if (!(params->flags & MODAVD_OPEN_NO_START)) {
+        int console = mx_console_command(port, "screenrecord webrtc start", 3000);
+        if (console != MODAVD_OK) {
+            return console;
+        }
+    }
+#endif
     mx_shm shm = { 0 };
     int rc = mx_shm_open(port, &shm);
     if (rc == MODAVD_E_NOT_READY && !(params->flags & MODAVD_OPEN_NO_START)) {
+#ifdef _WIN32
         int console = mx_console_command(port, "screenrecord webrtc start", 3000);
         if (console == MODAVD_E_NOT_FOUND) {
             return MODAVD_E_NOT_FOUND;
         }
+#endif
         for (int waited = 0; rc == MODAVD_E_NOT_READY && waited < timeout_ms; waited += 50) {
             sleep_ms(50);
             rc = mx_shm_open(port, &shm);
@@ -106,16 +207,43 @@ int modavd_open(const modavd_open_params* params, modavd_handle* out)
         return rc;
     }
 
+#ifdef _WIN32
+    /* The emulator whose region this is: the program on the console port. */
+    unsigned long pid = mx_console_owner_pid(port);
+    if (!pid && !(params->flags & MODAVD_OPEN_NO_START)) {
+        /* A region with no emulator behind it is left over from an emulator
+         * that exited while another program still held it. Holding it too
+         * would keep it alive for the next emulator on this port. */
+        mx_log(MODAVD_LOG_WARN, "port=%d: shared memory is there but no emulator listens on the console port",
+               port);
+        mx_shm_close(&shm);
+        return MODAVD_E_NOT_FOUND;
+    }
+#endif
+
     struct modavd_instance* inst = (struct modavd_instance*)calloc(1, sizeof(*inst));
-    if (!inst) {
+    struct mx_input* input = mx_input_create(port);
+    if (!inst || !input) {
+        free(inst);
+        mx_input_destroy(input);
         mx_shm_close(&shm);
         return MODAVD_E_IO;
     }
+    inst->input = input;
     inst->console_port = port;
+    inst->simd = mx_cpu_simd();
     inst->shm = shm;
     const volatile mx_video_info* vi = (const volatile mx_video_info*)shm.view;
     mx_log(MODAVD_LOG_INFO, "open port=%d %ux%u fps=%u frame=%u size=%zu client=%s", port, vi->width, vi->height,
            vi->fps, vi->frame_number, shm.size, params->client_name ? params->client_name : "-");
+#ifdef _WIN32
+    InitializeSRWLock((PSRWLOCK)&inst->shm_lock);
+    /* NO_START with no console trusts the mapping as it is, unwatched. */
+    if (pid && watch_emulator(inst, pid) != MODAVD_OK) {
+        mx_log(MODAVD_LOG_WARN, "port=%d: cannot watch emulator process %lu; its shared memory stays mapped", port,
+               pid);
+    }
+#endif
     *out = inst;
     return MODAVD_OK;
 }
@@ -125,11 +253,23 @@ void modavd_close(modavd_handle h)
     if (!h) {
         return;
     }
+#ifdef _WIN32
+    /* Waits for a running emulator_exited() before the handle goes away. */
+    unwatch_emulator(h, 1);
+#endif
+    /* Lifts the contacts this handle left down. */
+    mx_input_destroy(h->input);
     mx_shm_close(&h->shm);
     free(h);
 }
 
-uint32_t modavd_capabilities(modavd_handle h) { return h ? MODAVD_CAP_SCREENCAP : 0; }
+uint32_t modavd_capabilities(modavd_handle h)
+{
+    if (!h) {
+        return 0;
+    }
+    return MODAVD_CAP_SCREENCAP | MODAVD_CAP_TOUCH | MODAVD_CAP_TEXT | mx_input_capabilities(h->input);
+}
 
 int modavd_console_port(modavd_handle h) { return h ? h->console_port : MODAVD_E_INVALID; }
 
@@ -143,7 +283,90 @@ static int bytes_per_pixel(uint32_t format)
     }
 }
 
-static void convert_row(const uint8_t* src, uint8_t* dst, uint32_t width, uint32_t format)
+#if defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+#error "the pixel conversion below assumes a little-endian CPU"
+#endif
+
+/* BGRA -> BGR, portable: four pixels (16 bytes) in, three little-endian words (12 bytes) out,
+ * then one pixel at a time for the last 0-3. */
+static void bgr_row_portable(const uint8_t* src, uint8_t* dst, uint32_t width)
+{
+    uint32_t x = 0;
+    for (; x + 4 <= width; x += 4, src += 16, dst += 12) {
+        uint32_t p[4], o[3];
+        memcpy(p, src, sizeof(p));
+        o[0] = (p[0] & 0x00FFFFFFu) | (p[1] << 24);         /* B0 G0 R0 B1 */
+        o[1] = ((p[1] >> 8) & 0x0000FFFFu) | (p[2] << 16);  /* G1 R1 B2 G2 */
+        o[2] = ((p[2] >> 16) & 0x000000FFu) | (p[3] << 8);  /* R2 B3 G3 R3 */
+        memcpy(dst, o, sizeof(o));
+    }
+    for (; x < width; ++x, src += 4, dst += 3) {
+        dst[0] = src[0];
+        dst[1] = src[1];
+        dst[2] = src[2];
+    }
+}
+
+#if MX_X86
+/* BGRA -> BGR, 16 pixels at a time: pshufb packs each 16-byte load to 12 bytes,
+ * then shifts and ORs splice four of those into three 16-byte stores.
+ * Returns how many pixels it converted (a multiple of 16). */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((target("ssse3")))
+#endif
+static uint32_t bgr_row_ssse3(const uint8_t* src, uint8_t* dst, uint32_t width)
+{
+    const __m128i pack = _mm_setr_epi8(0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14, -1, -1, -1, -1);
+    uint32_t x = 0;
+    for (; x + 16 <= width; x += 16, src += 64, dst += 48) {
+        __m128i a = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(const void*)src), pack);
+        __m128i b = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(const void*)(src + 16)), pack);
+        __m128i c = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(const void*)(src + 32)), pack);
+        __m128i d = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(const void*)(src + 48)), pack);
+        _mm_storeu_si128((__m128i*)(void*)dst, _mm_or_si128(a, _mm_slli_si128(b, 12)));
+        _mm_storeu_si128((__m128i*)(void*)(dst + 16), _mm_or_si128(_mm_srli_si128(b, 4), _mm_slli_si128(c, 8)));
+        _mm_storeu_si128((__m128i*)(void*)(dst + 32), _mm_or_si128(_mm_srli_si128(c, 8), _mm_slli_si128(d, 4)));
+    }
+    return x;
+}
+#elif MX_NEON
+/* BGRA -> BGR, 16 pixels at a time: split the channels, store three of them interleaved. */
+static uint32_t bgr_row_neon(const uint8_t* src, uint8_t* dst, uint32_t width)
+{
+    uint32_t x = 0;
+    for (; x + 16 <= width; x += 16, src += 64, dst += 48) {
+        uint8x16x4_t p = vld4q_u8(src);
+        uint8x16x3_t o;
+        o.val[0] = p.val[0];
+        o.val[1] = p.val[1];
+        o.val[2] = p.val[2];
+        vst3q_u8(dst, o);
+    }
+    return x;
+}
+#endif
+
+int mx_cpu_simd(void)
+{
+#if MX_X86
+#if defined(__SSSE3__) || defined(__AVX__)
+    return 1;
+#elif defined(_MSC_VER)
+    int r[4];
+    __cpuid(r, 1);
+    return (r[2] >> 9) & 1; /* CPUID.1:ECX.SSSE3 */
+#else
+    unsigned a, b, c, d;
+    return __get_cpuid(1, &a, &b, &c, &d) && ((c >> 9) & 1);
+#endif
+#elif MX_NEON
+    return 1; /* part of every ARM64 CPU */
+#else
+    return 0;
+#endif
+}
+
+void mx_convert_row(const uint8_t* src, uint8_t* dst, uint32_t width, uint32_t format, int simd)
 {
     switch (format) {
     case MODAVD_FMT_BGRA:
@@ -159,19 +382,31 @@ static void convert_row(const uint8_t* src, uint8_t* dst, uint32_t width, uint32
             memcpy(dst + (size_t)x * 4, &p, 4);
         }
         break;
-    case MODAVD_FMT_BGR:
-        for (uint32_t x = 0; x < width; ++x, src += 4, dst += 3) {
-            dst[0] = src[0];
-            dst[1] = src[1];
-            dst[2] = src[2];
+    case MODAVD_FMT_BGR: {
+        uint32_t done = 0;
+#if MX_X86
+        if (simd) {
+            done = bgr_row_ssse3(src, dst, width);
         }
+#elif MX_NEON
+        if (simd) {
+            done = bgr_row_neon(src, dst, width);
+        }
+#else
+        (void)simd;
+#endif
+        bgr_row_portable(src + (size_t)done * 4, dst + (size_t)done * 3, width - done);
         break;
+    }
     default:
         break;
     }
 }
 
-int mx_copy_frame(const mx_shm* shm, uint32_t format, uint32_t flags, void* buf, size_t buf_size,
+void (*mx_test_after_copy)(void* user) = NULL;
+void* mx_test_after_copy_user = NULL;
+
+int mx_copy_frame(const mx_shm* shm, uint32_t format, uint32_t flags, int simd, void* buf, size_t buf_size,
                   modavd_frame_info* info)
 {
     int bpp = bytes_per_pixel(format);
@@ -187,7 +422,9 @@ int mx_copy_frame(const mx_shm* shm, uint32_t format, uint32_t flags, void* buf,
     info->format = format;
     info->frame_number = vi->frame_number;
     info->timestamp_us = vi->ts_us;
-    if (w == 0 || h == 0) {
+    /* Dimensions are set before the first frame is published. The counter
+     * can wrap to zero, and a published static frame need not advance. */
+    if (w == 0 || h == 0 || (info->timestamp_us == 0 && !(flags & MX_CAPTURE_UNPUBLISHED))) {
         return MODAVD_E_NOT_READY;
     }
     if (MX_HEADER_SIZE + (uint64_t)w * h * 4 > shm->size) {
@@ -208,16 +445,46 @@ int mx_copy_frame(const mx_shm* shm, uint32_t format, uint32_t flags, void* buf,
         uint32_t before = vi->frame_number;
         for (uint32_t y = 0; y < h; ++y) {
             uint32_t sy = (flags & MODAVD_CAPTURE_BOTTOM_UP) ? h - 1 - y : y;
-            convert_row(src + (size_t)sy * src_stride, dst + (size_t)y * (size_t)info->stride, w, format);
+            mx_convert_row(src + (size_t)sy * src_stride, dst + (size_t)y * (size_t)info->stride, w, format, simd);
+        }
+        if (mx_test_after_copy) {
+            mx_test_after_copy(mx_test_after_copy_user);
         }
         uint32_t after = vi->frame_number;
         info->frame_number = after;
         info->timestamp_us = vi->ts_us;
         if (after == before) {
-            break;
+            return MODAVD_OK;
         }
     }
-    return MODAVD_OK;
+    return MX_TORN;
+}
+
+int mx_capture_frame(struct modavd_instance* h, uint32_t format, uint32_t flags, void* buf, size_t buf_size,
+                     modavd_frame_info* info)
+{
+#ifdef _WIN32
+    PSRWLOCK lock = (PSRWLOCK)&h->shm_lock;
+    AcquireSRWLockShared(lock);
+    if (!h->shm.view) {
+        ReleaseSRWLockShared(lock);
+        AcquireSRWLockExclusive(lock);
+        if (!h->shm.view) {
+            reattach(h);
+        }
+        ReleaseSRWLockExclusive(lock);
+        AcquireSRWLockShared(lock);
+        if (!h->shm.view) {
+            ReleaseSRWLockShared(lock);
+            return MODAVD_E_NOT_FOUND;
+        }
+    }
+    int rc = mx_copy_frame(&h->shm, format, flags, h->simd, buf, buf_size, info);
+    ReleaseSRWLockShared(lock);
+    return rc;
+#else
+    return mx_copy_frame(&h->shm, format, flags, h->simd, buf, buf_size, info);
+#endif
 }
 
 int modavd_capture(modavd_handle h, int display, uint32_t format, uint32_t flags, void* buf, size_t buf_size,
@@ -229,42 +496,11 @@ int modavd_capture(modavd_handle h, int display, uint32_t format, uint32_t flags
     if (display != 0) {
         return MODAVD_E_UNSUPPORTED;
     }
-    return mx_copy_frame(&h->shm, format, flags, buf, buf_size, info);
-}
-
-/* Input arrives in the next version. */
-int modavd_touch_down(modavd_handle h, int display, int contact, int x, int y, int pressure)
-{
-    (void)h, (void)display, (void)contact, (void)x, (void)y, (void)pressure;
-    return MODAVD_E_UNSUPPORTED;
-}
-
-int modavd_touch_move(modavd_handle h, int display, int contact, int x, int y, int pressure)
-{
-    (void)h, (void)display, (void)contact, (void)x, (void)y, (void)pressure;
-    return MODAVD_E_UNSUPPORTED;
-}
-
-int modavd_touch_up(modavd_handle h, int display, int contact)
-{
-    (void)h, (void)display, (void)contact;
-    return MODAVD_E_UNSUPPORTED;
-}
-
-int modavd_touch_release_all(modavd_handle h)
-{
-    (void)h;
-    return MODAVD_E_UNSUPPORTED;
-}
-
-int modavd_key(modavd_handle h, int display, int android_keycode, int down)
-{
-    (void)h, (void)display, (void)android_keycode, (void)down;
-    return MODAVD_E_UNSUPPORTED;
-}
-
-int modavd_input_text(modavd_handle h, const char* utf8)
-{
-    (void)h, (void)utf8;
-    return MODAVD_E_UNSUPPORTED;
+    int rc = mx_capture_frame(h, format, flags & ~MX_CAPTURE_UNPUBLISHED, buf, buf_size, info);
+    if (rc == MX_TORN) {
+        mx_log(MODAVD_LOG_WARN, "port=%d: a new frame arrived during each of %d copies", h->console_port,
+               MX_MAX_COPY_ATTEMPTS);
+        return MODAVD_E_NOT_READY;
+    }
+    return rc;
 }

@@ -1,5 +1,7 @@
 # 参与 ModAVDExtras
 
+**简体中文** | [English](CONTRIBUTING.en.md)
+
 ModAVD 组织的通用规矩见 [ModAVD 的 CONTRIBUTING.md](https://github.com/ModAVD/ModAVD/blob/main/CONTRIBUTING.md) 和文档站的[参与开发](https://modavd.github.io/develop/)：先开 issue 商量，从自己的 fork 开 PR，署名用 GitHub 的 noreply 邮箱，不写 `Co-authored-by`，用 AI 工具要让它自己测过并在 PR 里写明。
 
 下面是这个仓库自己的几条。
@@ -27,3 +29,5 @@ ModAVD 组织的通用规矩见 [ModAVD 的 CONTRIBUTING.md](https://github.com/
 ## workflow
 
 第三方 action 钉到 40 位提交 SHA，不用 `pull_request_target`，不用自托管 runner。改 workflow 的 PR 由另一个人审。
+
+`scripts/privacy.py` 与 ModAVD 主仓逐字节相同，CI 会核对。修改扫描器时先改 ModAVD，再原样同步过来；`privacy-allowlist.json` 仍由本仓库维护。
