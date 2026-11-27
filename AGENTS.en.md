@@ -19,7 +19,7 @@ For the general rules (language, commit messages, attribution, privacy, how to t
 - `include/modavd_extras.h` is a public promise: functions and fields are only added, never removed, and when you add one, increase `MODAVD_API_VERSION` by one. The `size` field at the start of a struct must not change.
 - The library does not fall back to adb by itself; it returns an error code.
 - The exports of the compatibility shim must stay as they are: only the four screenshot functions, no input functions. `tests/test_shim.c` checks this.
-- A change users can see comes with `changelog.d/<name>.<feat|fix|change|remove>.md`; changes that only touch development, tests, CI or documentation need none.
+- A change users can see comes with `changelog.d/<name>.<feat|fix|change|remove>.md`, with two lines: Chinese, then English; changes that only touch development, tests, CI or documentation need none.
 - `README.md` and `README.en.md`, `CONTRIBUTING.md` and `CONTRIBUTING.en.md`, and `AGENTS.md` and `AGENTS.en.md` are the Chinese and the English of the same document: if you change one, change the other in the same PR.
 
 ## Testing
